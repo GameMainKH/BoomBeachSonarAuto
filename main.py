@@ -5,7 +5,7 @@ from time import sleep
 import cv2
 import numpy as np
 
-from config import OUTPUT_DIR
+from config import SCREENSHOT_DIR
 from utils import AdbController, MatchResult, find_template, get_logger, is_diamond_hit
 from utils.diamond_centers import detect_diamond_centers, write_image
 
@@ -25,10 +25,6 @@ LEVELDICT = {
     10: 10,
     11: 10,
     12: 10,
-    13: 10,
-    14: 10,
-    15: 10,
-    16: 10,
 }
 
 def set_qnet_and_start():
@@ -56,19 +52,21 @@ def enter_account(img_path: str):
     pass
 
 def enter_activity():
-    res = wait_until_occur("./template/activity_button.png", timeout=15)
+    adb.delay(0.5)
+    res = wait_until_occur("./template/activity_button.png", timeout=20)
     if res is None:
         logger.error("未找到活动按钮，无法进入活动界面，重试中...")
         adb.close_app("com.tencent.tmgp.supercell.boombeach")
         adb.delay(1.5).open_app("com.tencent.tmgp.supercell.boombeach")
-        login_img = wait_until_occur("./template/login.png", timeout=15)
+        login_img = wait_until_occur("./template/login.png", timeout=20)
         adb.click(*login_img.center) # 点击登录按钮
         return enter_activity()
 
     adb.click(*res.center) # 点击活动按钮进入活动界面
-    adb.delay(0.5).swipe(1000, 660, 1000, 180) # 上滑展示全部选项
+    check_qnet(0.8) # 确保 Qnet 已开启
+    adb.delay(0.1).swipe(1000, 660, 1000, 180) # 上滑展示全部选项
     adb.delay(0.5).click(1205, 644) # 点击进入活动详情界面
-    if wait_until_occur("./template/quit_activity.png", timeout=5) is None:
+    if wait_until_occur("./template/quit_activity.png", timeout=10) is None:
         logger.warning("进入活动详情界面失败，重新尝试进入活动")
         return enter_activity()
 
@@ -151,13 +149,16 @@ def save_hit_map_image(
 def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray, np.ndarray]:
     # 获取当前关卡的棱形方格中心坐标列表
     adb.delay(1.5)
+    adb.pinch_in(distance=10, duration_ms=200)
     grid_img = adb.read_screenshot()
     grid_result = detect_diamond_centers(grid_img, LEVELDICT[level])
     click_points = grid_result.points
     
     for i, (x, y) in enumerate(click_points): # 遍历每个方格中心坐标
-        check_qnet()
-        if wait_until_occur("./template/quit_activity.png", timeout=3) is None:
+        check_qnet(0)
+        if i != 0:
+            adb.pinch_in(distance=10, duration_ms=200)
+        if wait_until_occur("./template/quit_activity.png", timeout=6) is None:
             logger.warning("点击方格前不在活动详情界面，重新进入活动后跳过本次点击")
             enter_activity()
             continue
@@ -171,7 +172,8 @@ def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray,
             continue
         
         enter_activity() # 重新进入活动界面
-        after_img = adb.delay(1.5).read_screenshot("debug_after.png")
+        adb.pinch_in(distance=10, duration_ms=200)
+        after_img = adb.delay(1.2).read_screenshot("debug_after.png")
         if is_diamond_hit(before_img, after_img, (x, y)):
             square_size = LEVELDICT[level]
             hit_map[i//square_size][i%square_size] = 1
@@ -184,34 +186,36 @@ def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray,
             enter_activity()
             continue
         
-        adb.delay(1.5)
+        adb.delay(0.8)
         if not click_template("./template/ship.png", threshold=0.9):
             logger.warning("未找到船图标，重新进入下一轮")
             enter_activity()
             continue
         
-        adb.go_home()
+        adb.delay(0.5).close_app("com.tencent.tmgp.supercell.boombeach") # 关闭游戏准备下一轮
         restart_game()
 
     return grid_img, grid_result.global_quad
         
 def restart_game():
-    adb.open_app("com.tencent.tmgp.supercell.boombeach")
-    adb.delay(3).click(1182, 35) # 打开弱网
+    adb.delay(1.5).open_app("com.tencent.tmgp.supercell.boombeach")
+    adb.delay(3.2).click(1182, 35) # 打开弱网
+    login_img = wait_until_occur("./template/login.png", timeout=20)
+    adb.click(*login_img.center) # 点击登录按钮
     enter_activity()
     
 def is_hit():
     img = adb.read_screenshot()
     return find_template(img, "./template/hit.png", threshold=0.9) is not None  
 
-def check_qnet():
+def check_qnet(second: float = 1):
     """ 检查 Qnet 是否开启，如果未开启则点击开启。"""
     screenshot = adb.read_screenshot()
     match_result = find_template(screenshot, "./template/qnet_button_off.png", threshold=0.85)
     if match_result is not None:
         logger.info("检测到 Qnet 未开启，正在开启...")
         adb.click(*match_result.center)
-        sleep(2)  # 等待状态更新
+        sleep(second)  # 等待状态更新
     else:
         logger.info("Qnet 已经处于开启状态")
         
@@ -243,7 +247,7 @@ def main(level: int):
     print(hit_map)
     enter_activity()
     base_img, quad = handle_game_level(level, hit_map)
-    out_path = OUTPUT_DIR / f"hit_map_level_{level}.png"
+    out_path = SCREENSHOT_DIR / f"hit_map_level_{level}.png"
     save_hit_map_image(base_img, quad, hit_map, out_path)
     print(hit_map)
     print(f"命中可视化图片已保存：{out_path}")
@@ -253,3 +257,4 @@ if __name__ == "__main__":
     # set_qnet_and_start()
     level = 1
     main(level)
+    
