@@ -28,6 +28,10 @@ class AdbController:
         self.serial = serial
         self._touch_device_info: tuple[str, int, int, int, int] | None = None
         self._next_touch_tracking_id = 100
+        self._root_shell_ready = False
+        self._package_uid_cache: dict[str, int] = {}
+        self._ip6tables_available: bool | None = None
+        self._weak_network_enabled_uids: set[int] = set()
         if auto_connect:
             self.connect()
         logger.info("adb 控制器已初始化: %s", self.serial)
@@ -41,6 +45,16 @@ class AdbController:
 
         logger.debug("执行 adb 命令: %s", " ".join(command))
         result = subprocess.run(command, capture_output=True, text=True)
+        if check and device and result.returncode != 0 and self._is_recoverable_adb_error(result):
+            logger.warning(
+                "ADB 连接异常，正在重连并重试: command=%s stdout=%r stderr=%r",
+                " ".join(command),
+                _limit_text(result.stdout),
+                _limit_text(result.stderr),
+            )
+            self._recover_connection()
+            result = subprocess.run(command, capture_output=True, text=True)
+
         if check and result.returncode != 0:
             logger.error(
                 "adb 命令失败: command=%s returncode=%s stdout=%r stderr=%r",
@@ -136,6 +150,70 @@ class AdbController:
 
         self._run(["shell", "am", "force-stop", package_name])
         logger.info("已通过包名关闭 APP: %s", package_name)
+
+    def enable_weak_network(self, package_name: str) -> None:
+        """通过包名开启弱网，阻断该 APP 的出站网络。"""
+        package_name = package_name.strip()
+        if not package_name:
+            _raise_value_error("包名不能为空")
+
+        uid = self._get_package_uid(package_name)
+        self._set_weak_network_rule(uid, enabled=True)
+        logger.info("已开启 APP 弱网: package=%s uid=%s", package_name, uid)
+
+    def disable_weak_network(self, package_name: str) -> None:
+        """通过包名关闭弱网，恢复该 APP 的出站网络。"""
+        package_name = package_name.strip()
+        if not package_name:
+            _raise_value_error("包名不能为空")
+
+        uid = self._get_package_uid(package_name)
+        self._set_weak_network_rule(uid, enabled=False)
+        logger.info("已关闭 APP 弱网: package=%s uid=%s", package_name, uid)
+
+    def get_weak_network_diagnostics(self, package_name: str) -> str:
+        """读取当前弱网规则和计数器，方便排查脚本运行时的真实状态。"""
+        package_name = package_name.strip()
+        if not package_name:
+            _raise_value_error("包名不能为空")
+
+        uid = self._get_package_uid(package_name)
+        script = _build_weak_network_diagnostics_script(uid)
+        result = self._run_privileged_script(script, check=False)
+        output = result.stdout.strip()
+        error = result.stderr.strip()
+        sections = [f"package={package_name}", f"uid={uid}", f"returncode={result.returncode}"]
+        if output:
+            sections.append(output)
+        if error:
+            sections.append(f"stderr={_limit_text(error, 1200)}")
+        return "\n".join(sections)
+
+    def ensure_root_shell(self) -> None:
+        """确保 adb shell 已经以 root 身份运行，避免 su 授权弹窗。"""
+        if self._root_shell_ready:
+            return
+        if self._is_root_shell():
+            self._root_shell_ready = True
+            logger.info("adb shell 已是 root")
+            return
+
+        logger.warning("adb shell 不是 root，正在执行 adb root 并重连")
+        root_result = self._run(["root"], check=False)
+        logger.info(
+            "adb root 结果: returncode=%s stdout=%r stderr=%r",
+            root_result.returncode,
+            _limit_text(root_result.stdout),
+            _limit_text(root_result.stderr),
+        )
+        sleep(1.5)
+        self.connect()
+        sleep(0.5)
+        if not self._is_root_shell():
+            raise RuntimeError("当前设备无法通过 adb root 获得 root shell，弱网控制会触发授权弹窗，已中止")
+
+        self._root_shell_ready = True
+        logger.info("adb shell root 已准备就绪")
 
     def swipe(
         self,
@@ -276,6 +354,32 @@ class AdbController:
         logger.info("连接 adb 设备: %s", self.serial)
         self._run(["connect", self.serial], device=False)
 
+    def _recover_connection(self) -> None:
+        """恢复异常的 adb 连接，并清理依赖设备状态的缓存。"""
+        self._touch_device_info = None
+        self._root_shell_ready = False
+        disconnect_command = ["adb", "disconnect", self.serial]
+        logger.info("断开 adb 设备连接: %s", self.serial)
+        subprocess.run(disconnect_command, capture_output=True, text=True)
+        sleep(0.5)
+        self.connect()
+        sleep(1.0)
+
+    @staticmethod
+    def _is_recoverable_adb_error(result: subprocess.CompletedProcess[str]) -> bool:
+        """判断 adb 失败是否属于可通过重连恢复的连接错误。"""
+        output = f"{result.stdout}\n{result.stderr}".lower()
+        recoverable_messages = [
+            "error: closed",
+            "device offline",
+            "no devices/emulators found",
+            "device not found",
+            "cannot connect",
+            "failed to connect",
+            "unable to connect",
+        ]
+        return any(message in output for message in recoverable_messages)
+
     def adb_restart(self) -> None:
         """重启 adb 服务。"""
         logger.warning("重启 adb 服务")
@@ -328,7 +432,7 @@ class AdbController:
             first_tracking_id,
             second_tracking_id,
         )
-        self._run(["shell", "sh", "-c", script])
+        self._run(["shell", "sh", "-c", _quote_shell_arg(script)])
 
     def _next_touch_tracking_ids(self) -> tuple[int, int]:
         """获取本次双指手势使用的唯一触点 ID。"""
@@ -351,6 +455,79 @@ class AdbController:
         self._touch_device_info = touch_device_info
         return touch_device_info
 
+    def _get_package_uid(self, package_name: str) -> int:
+        """读取指定包名对应的安卓 UID。"""
+        if package_name in self._package_uid_cache:
+            return self._package_uid_cache[package_name]
+
+        result = self._run(["shell", "cmd", "package", "list", "packages", "-U", package_name])
+        uid_match = re.search(rf"package:{re.escape(package_name)}\s+uid:(\d+)", result.stdout)
+        if uid_match is None:
+            _raise_value_error(f"未找到包名对应的 UID: {package_name}")
+        uid = int(uid_match.group(1))
+        self._package_uid_cache[package_name] = uid
+        return uid
+
+    def _set_weak_network_rule(self, uid: int, *, enabled: bool) -> None:
+        """配置 IPv4/IPv6 的按 UID 弱网规则。"""
+        action = "开启" if enabled else "关闭"
+        if enabled and uid in self._weak_network_enabled_uids:
+            if self._is_weak_network_rule_active(uid):
+                logger.info("APP 弱网已开启，跳过重复设置: uid=%s", uid)
+                return
+            logger.warning("本地缓存显示弱网已开启，但规则不存在，正在重新设置: uid=%s", uid)
+            self._weak_network_enabled_uids.discard(uid)
+
+        self._run_privileged_script(_build_weak_network_script("iptables", uid, enabled))
+        if self._is_ip6tables_available() is False:
+            logger.warning("ip6tables 不可用，仅%s IPv4 弱网规则: uid=%s", action, uid)
+            self._update_weak_network_state(uid, enabled)
+            return
+
+        ip6_result = self._run_privileged_script(_build_weak_network_script("ip6tables", uid, enabled), check=False)
+        if ip6_result.returncode != 0:
+            logger.warning(
+                "ip6tables %s弱网规则失败，已忽略 IPv6: uid=%s stdout=%r stderr=%r",
+                action,
+                uid,
+                _limit_text(ip6_result.stdout),
+                _limit_text(ip6_result.stderr),
+            )
+
+        self._update_weak_network_state(uid, enabled)
+
+    def _is_ip6tables_available(self) -> bool:
+        """检查并缓存 ip6tables 是否可用。"""
+        if self._ip6tables_available is not None:
+            return self._ip6tables_available
+
+        result = self._run_privileged_script("command -v ip6tables >/dev/null", check=False)
+        self._ip6tables_available = result.returncode == 0
+        return self._ip6tables_available
+
+    def _update_weak_network_state(self, uid: int, enabled: bool) -> None:
+        """更新本地弱网状态缓存。"""
+        if enabled:
+            self._weak_network_enabled_uids.add(uid)
+        else:
+            self._weak_network_enabled_uids.discard(uid)
+
+    def _is_weak_network_rule_active(self, uid: int) -> bool:
+        """确认当前 iptables 中是否存在指定 UID 的弱网规则。"""
+        script = f"iptables -C OUTPUT -m owner --uid-owner {uid} -j BBMA_WEAKNET"
+        result = self._run_privileged_script(script, check=False)
+        return result.returncode == 0
+
+    def _run_privileged_script(self, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """使用 root adb shell 执行特权脚本。"""
+        self.ensure_root_shell()
+        return self._run(["shell", "sh", "-c", _quote_shell_arg(script)], check=check)
+
+    def _is_root_shell(self) -> bool:
+        """检查当前 adb shell 是否已经是 root。"""
+        result = self._run(["shell", "id", "-u"], check=False)
+        return result.returncode == 0 and result.stdout.strip() == "0"
+
 
 def _limit_text(text: str, limit: int = 500) -> str:
     """限制日志中的命令输出长度，避免单条日志过长。"""
@@ -358,6 +535,45 @@ def _limit_text(text: str, limit: int = 500) -> str:
     if len(stripped) <= limit:
         return stripped
     return stripped[:limit] + "...(truncated)"
+
+
+def _build_weak_network_script(command: str, uid: int, enabled: bool) -> str:
+    """生成按 UID 控制弱网的 iptables 脚本。"""
+    chain = "BBMA_WEAKNET"
+    if enabled:
+        return (
+            f"{command} -N {chain} 2>/dev/null || true; "
+            f"{command} -C {chain} -j DROP 2>/dev/null || {command} -A {chain} -j DROP; "
+            f"{command} -C OUTPUT -m owner --uid-owner {uid} -j {chain} 2>/dev/null "
+            f"|| {command} -I OUTPUT -m owner --uid-owner {uid} -j {chain}"
+        )
+    return (
+        f"while {command} -C OUTPUT -m owner --uid-owner {uid} -j {chain} 2>/dev/null; "
+        f"do {command} -D OUTPUT -m owner --uid-owner {uid} -j {chain}; done"
+    )
+
+
+def _build_weak_network_diagnostics_script(uid: int) -> str:
+    """生成弱网状态诊断脚本，只读取规则和计数器，不修改设备状态。"""
+    chain = "BBMA_WEAKNET"
+    return (
+        f"echo ipv4_rule=$([ $(iptables -C OUTPUT -m owner --uid-owner {uid} -j {chain} "
+        f"2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "
+        f"if command -v ip6tables >/dev/null 2>&1; then "
+        f"echo ipv6_rule=$([ $(ip6tables -C OUTPUT -m owner --uid-owner {uid} -j {chain} "
+        f"2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "
+        f"else echo ipv6_rule=unavailable; fi; "
+        f"echo '[iptables OUTPUT]'; iptables -L OUTPUT -v -n 2>&1; "
+        f"echo '[iptables {chain}]'; iptables -L {chain} -v -n 2>&1; "
+        f"if command -v ip6tables >/dev/null 2>&1; then "
+        f"echo '[ip6tables OUTPUT]'; ip6tables -L OUTPUT -v -n 2>&1; "
+        f"echo '[ip6tables {chain}]'; ip6tables -L {chain} -v -n 2>&1; fi"
+    )
+
+
+def _quote_shell_arg(text: str) -> str:
+    """把字符串包成 shell 单引号参数。"""
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 def _raise_value_error(message: str) -> None:

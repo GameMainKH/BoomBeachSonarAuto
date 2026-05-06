@@ -2,12 +2,12 @@ __pycache__/
 *.py[cod]
 .venv/
 outputs/*.png
-_debug/screenshots/
-_debug/logs/
+_debug/screenshots/*.png
+_debug/logs/*.log
 
+save_points/dbg
 _screen.png
 *.log
-*.png
 .venv/
 venv/
 .env

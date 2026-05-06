@@ -6,12 +6,39 @@ BASE_DIR = Path(__file__).resolve().parent
 # ADB 连接的默认设备 IP 地址
 ADB_SERIAL = "127.0.0.1:5555"
 
+# 默认控制的游戏包名
+GAME_PACKAGE_NAME = "com.tencent.tmgp.supercell.boombeach"
+
 # 模板图片目录和截图保存目录
 TEMPLATE_DIR = BASE_DIR / "template"
 SCREENSHOT_DIR = BASE_DIR / "_debug" / "screenshots"
 LOG_DIR = BASE_DIR / "_debug" / "logs"
 LOG_FILE = LOG_DIR / "bbma.log"
 OUTPUT_DIR = BASE_DIR / "outputs"
+
+# 固定关卡对应的菱形网格边长
+LEVEL_GRID_SIZES = {
+    1: 3,
+    2: 4,
+    3: 5,
+    4: 6,
+    5: 7,
+    6: 8,
+    7: 9,
+    8: 10,
+    9: 10,
+    10: 10,
+    11: 10,
+    12: 10,
+    13: 10,
+    14: 10,
+    15: 10,
+    16: 10,
+}
+
+# 是否优先使用人工校准后的固定点位
+USE_SAVED_POINTS = True
+SAVED_POINTS_FILE = BASE_DIR / "save_points" / "points.json"
 
 # 默认的截图文件名和模板匹配的默认阈值
 DEFAULT_SCREENSHOT_NAME = "screen.png"
