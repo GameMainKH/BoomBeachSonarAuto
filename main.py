@@ -37,8 +37,7 @@ def set_qnet_and_start():
     adb.delay(0.2).click(354, 1228) # 单击开始测试
     
     
-def enter_account(img_path: str):
-    # adb.delay(2).click(99, 30) # 暂时关闭弱网
+def enter_account(img_path: str): # 暂未实现
     pass
 
 def enable_weak_network(second: float = 0) -> None:
@@ -66,6 +65,14 @@ def cleanup_weak_network(reason: str = "脚本退出") -> None:
     except Exception as exc:
         logger.error("关闭弱网失败: %s", exc)
 
+def cleanup_reject_network(reason: str = "脚本退出") -> None:
+    """关闭游戏 REJECT 断网残留，避免影响本次或下次运行。"""
+    try:
+        logger.info("%s，正在清理 REJECT 断网", reason)
+        adb.disable_reject_network(GAME_PACKAGE_NAME)
+    except Exception as exc:
+        logger.error("清理 REJECT 断网失败: %s", exc)
+
 def handle_exit_signal(signum: int, _frame) -> None:
     """收到退出信号时先关闭弱网再退出。"""
     cleanup_weak_network(f"收到退出信号 {signum}")
@@ -90,12 +97,13 @@ def enter_activity(re_enter: bool = False) -> None:
         adb.click(*login_img.center) # 点击登录按钮
         return enter_activity()
 
-    if not re_enter:
-        enable_weak_network(2)
     adb.click(*res.center) # 点击活动按钮进入活动界面
-    adb.delay(0.4).swipe(1000, 660, 1000, 180) # 上滑展示全部选项
-    adb.delay(0.2).swipe(1000, 660, 1000, 180) # 上滑展示全部选项
-    adb.delay(0.8).click(1205, 644) # 点击进入活动详情界面
+    if not re_enter:
+        enable_weak_network(0.2)
+        adb.delay(0.4).swipe(1000, 660, 1000, 180) # 上滑展示全部选项（仅第一次进入需要）
+        adb.delay(0.2).swipe(1000, 660, 1000, 180) 
+    
+    adb.delay(0.7).click(1205, 644) # 点击进入活动详情界面
     if wait_until_occur("./template/quit_activity.png", timeout=10) is None:
         logger.warning("进入活动详情界面失败，重新尝试进入活动")
         return enter_activity()
@@ -208,7 +216,7 @@ def get_click_points(level: int, grid_img: np.ndarray) -> tuple[list[tuple[int, 
 def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray, np.ndarray]:
     # 获取当前关卡的棱形方格中心坐标列表
     adb.delay(1.5)
-    # adb.pinch_in(distance=10, duration_ms=200)
+    # adb.pinch_in(distance=10, duration_ms=200) # 缩小视野，目前不需要
     grid_img = adb.read_screenshot()
     click_points, grid_quad = get_click_points(level, grid_img)
     
@@ -222,7 +230,7 @@ def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray,
 
         before_img = adb.read_screenshot("./_debug/screenshots/run_debug/debug_before.png") # 点击前截图
         adb.click(x, y)
-        adb.delay(0.5)
+        adb.delay(0.3)
         if not click_template("./template/quit_activity.png", "./_debug/screenshots/run_debug/debug_quit1.png"):
             logger.warning("点击方格后未找到退出按钮，当前页面可能已离开活动详情界面")
             enter_activity()
@@ -230,7 +238,7 @@ def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray,
         
         enter_activity(re_enter=True) # 重新进入活动界面
         # adb.pinch_in(distance=10, duration_ms=200)
-        after_img = adb.delay(1.2).read_screenshot("./_debug/screenshots/run_debug/debug_after.png")
+        after_img = adb.delay(1).read_screenshot("./_debug/screenshots/run_debug/debug_after.png")
         if is_diamond_hit(before_img, after_img, (x, y)):
             square_size = get_level_grid_size(level)
             hit_map[i//square_size][i%square_size] = 1
@@ -238,28 +246,18 @@ def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray,
         else:
             logger.info("第 %s 关，点击方格 %s 结果：未击中", level, i)
             
-        if not click_template("./template/quit_activity.png", "./_debug/screenshots/run_debug/debug_quit2.png"):
-            logger.warning("判断结果后未找到退出按钮，重新进入下一轮")
-            enter_activity()
-            continue
+
+        adb.enable_reject_network(GAME_PACKAGE_NAME)
+        retry = wait_until_occur("./template/retry.png", timeout=20)
+        adb.disable_reject_network(GAME_PACKAGE_NAME)
+        adb.delay(0.5).click(*retry.center) # 点击重试按钮
         
-        adb.delay(0.8)
-        if not click_template("./template/ship.png", threshold=0.9):
-            logger.warning("未找到船图标，重新进入下一轮")
-            enter_activity()
-            continue
-        
-        adb.delay(2.5).go_home() # 关闭游戏准备下一轮
-        restart_game()
+        restart_process()
 
     return grid_img, grid_quad
         
-def restart_game():
-    adb.delay(1.5).open_app(GAME_PACKAGE_NAME)
-    adb.delay(4.5)
+def restart_process():
     disable_weak_network()
-    # login_img = wait_until_occur("./template/login.png", timeout=20)
-    # adb.click(*login_img.center) # 点击登录按钮
     enter_activity()
     
 def is_hit():
@@ -312,7 +310,9 @@ if __name__ == "__main__":
     level = 1
     try:
         adb.ensure_root_shell()
+        cleanup_reject_network("主流程启动")
         main(level)
     finally:
         cleanup_weak_network("主流程结束")
+        cleanup_reject_network("主流程结束")
     

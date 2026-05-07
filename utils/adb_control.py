@@ -32,6 +32,7 @@ class AdbController:
         self._package_uid_cache: dict[str, int] = {}
         self._ip6tables_available: bool | None = None
         self._weak_network_enabled_uids: set[int] = set()
+        self._reject_network_enabled_uids: set[int] = set()
         if auto_connect:
             self.connect()
         logger.info("adb 控制器已初始化: %s", self.serial)
@@ -171,6 +172,26 @@ class AdbController:
         self._set_weak_network_rule(uid, enabled=False)
         logger.info("已关闭 APP 弱网: package=%s uid=%s", package_name, uid)
 
+    def enable_reject_network(self, package_name: str) -> None:
+        """通过包名开启 REJECT 断网，独立于 DROP 弱网规则。"""
+        package_name = package_name.strip()
+        if not package_name:
+            _raise_value_error("包名不能为空")
+
+        uid = self._get_package_uid(package_name)
+        self._set_reject_network_rule(uid, enabled=True)
+        logger.info("已开启 APP REJECT 断网: package=%s uid=%s", package_name, uid)
+
+    def disable_reject_network(self, package_name: str) -> None:
+        """通过包名关闭 REJECT 断网，不影响 DROP 弱网规则。"""
+        package_name = package_name.strip()
+        if not package_name:
+            _raise_value_error("包名不能为空")
+
+        uid = self._get_package_uid(package_name)
+        self._set_reject_network_rule(uid, enabled=False)
+        logger.info("已关闭 APP REJECT 断网: package=%s uid=%s", package_name, uid)
+
     def get_weak_network_diagnostics(self, package_name: str) -> str:
         """读取当前弱网规则和计数器，方便排查脚本运行时的真实状态。"""
         package_name = package_name.strip()
@@ -179,6 +200,24 @@ class AdbController:
 
         uid = self._get_package_uid(package_name)
         script = _build_weak_network_diagnostics_script(uid)
+        result = self._run_privileged_script(script, check=False)
+        output = result.stdout.strip()
+        error = result.stderr.strip()
+        sections = [f"package={package_name}", f"uid={uid}", f"returncode={result.returncode}"]
+        if output:
+            sections.append(output)
+        if error:
+            sections.append(f"stderr={_limit_text(error, 1200)}")
+        return "\n".join(sections)
+
+    def get_reject_network_diagnostics(self, package_name: str) -> str:
+        """读取当前 REJECT 断网规则和计数器，方便排查残留规则。"""
+        package_name = package_name.strip()
+        if not package_name:
+            _raise_value_error("包名不能为空")
+
+        uid = self._get_package_uid(package_name)
+        script = _build_reject_network_diagnostics_script(uid)
         result = self._run_privileged_script(script, check=False)
         output = result.stdout.strip()
         error = result.stderr.strip()
@@ -496,6 +535,34 @@ class AdbController:
 
         self._update_weak_network_state(uid, enabled)
 
+    def _set_reject_network_rule(self, uid: int, *, enabled: bool) -> None:
+        """配置 IPv4/IPv6 的按 UID REJECT 断网规则。"""
+        action = "开启" if enabled else "关闭"
+        if enabled and uid in self._reject_network_enabled_uids:
+            if self._is_reject_network_rule_active(uid):
+                logger.info("APP REJECT 断网已开启，跳过重复设置: uid=%s", uid)
+                return
+            logger.warning("本地缓存显示 REJECT 断网已开启，但规则不存在，正在重新设置: uid=%s", uid)
+            self._reject_network_enabled_uids.discard(uid)
+
+        self._run_privileged_script(_build_reject_network_script("iptables", uid, enabled))
+        if self._is_ip6tables_available() is False:
+            logger.warning("ip6tables 不可用，仅%s IPv4 REJECT 断网规则: uid=%s", action, uid)
+            self._update_reject_network_state(uid, enabled)
+            return
+
+        ip6_result = self._run_privileged_script(_build_reject_network_script("ip6tables", uid, enabled), check=False)
+        if ip6_result.returncode != 0:
+            logger.warning(
+                "ip6tables %s REJECT 断网规则失败，已忽略 IPv6: uid=%s stdout=%r stderr=%r",
+                action,
+                uid,
+                _limit_text(ip6_result.stdout),
+                _limit_text(ip6_result.stderr),
+            )
+
+        self._update_reject_network_state(uid, enabled)
+
     def _is_ip6tables_available(self) -> bool:
         """检查并缓存 ip6tables 是否可用。"""
         if self._ip6tables_available is not None:
@@ -512,9 +579,22 @@ class AdbController:
         else:
             self._weak_network_enabled_uids.discard(uid)
 
+    def _update_reject_network_state(self, uid: int, enabled: bool) -> None:
+        """更新本地 REJECT 断网状态缓存。"""
+        if enabled:
+            self._reject_network_enabled_uids.add(uid)
+        else:
+            self._reject_network_enabled_uids.discard(uid)
+
     def _is_weak_network_rule_active(self, uid: int) -> bool:
         """确认当前 iptables 中是否存在指定 UID 的弱网规则。"""
         script = f"iptables -C OUTPUT -m owner --uid-owner {uid} -j BBMA_WEAKNET"
+        result = self._run_privileged_script(script, check=False)
+        return result.returncode == 0
+
+    def _is_reject_network_rule_active(self, uid: int) -> bool:
+        """确认当前 iptables 中是否存在指定 UID 的 REJECT 断网规则。"""
+        script = f"iptables -C OUTPUT -m owner --uid-owner {uid} -j BBMA_REJECTNET"
         result = self._run_privileged_script(script, check=False)
         return result.returncode == 0
 
@@ -553,9 +633,48 @@ def _build_weak_network_script(command: str, uid: int, enabled: bool) -> str:
     )
 
 
+def _build_reject_network_script(command: str, uid: int, enabled: bool) -> str:
+    """生成按 UID 控制 REJECT 断网的 iptables 脚本。"""
+    chain = "BBMA_REJECTNET"
+    if enabled:
+        reject_with = "icmp6-port-unreachable" if command == "ip6tables" else "icmp-port-unreachable"
+        return (
+            f"{command} -N {chain} 2>/dev/null || true; "
+            f"{command} -F {chain}; "
+            f"{command} -A {chain} -p tcp -j REJECT --reject-with tcp-reset; "
+            f"{command} -A {chain} -j REJECT --reject-with {reject_with}; "
+            f"{command} -C OUTPUT -m owner --uid-owner {uid} -j {chain} 2>/dev/null "
+            f"|| {command} -I OUTPUT -m owner --uid-owner {uid} -j {chain}"
+        )
+    return (
+        f"while {command} -C OUTPUT -m owner --uid-owner {uid} -j {chain} 2>/dev/null; "
+        f"do {command} -D OUTPUT -m owner --uid-owner {uid} -j {chain}; done; "
+        f"{command} -F {chain} 2>/dev/null || true; "
+        f"{command} -X {chain} 2>/dev/null || true"
+    )
+
+
 def _build_weak_network_diagnostics_script(uid: int) -> str:
     """生成弱网状态诊断脚本，只读取规则和计数器，不修改设备状态。"""
     chain = "BBMA_WEAKNET"
+    return (
+        f"echo ipv4_rule=$([ $(iptables -C OUTPUT -m owner --uid-owner {uid} -j {chain} "
+        f"2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "
+        f"if command -v ip6tables >/dev/null 2>&1; then "
+        f"echo ipv6_rule=$([ $(ip6tables -C OUTPUT -m owner --uid-owner {uid} -j {chain} "
+        f"2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "
+        f"else echo ipv6_rule=unavailable; fi; "
+        f"echo '[iptables OUTPUT]'; iptables -L OUTPUT -v -n 2>&1; "
+        f"echo '[iptables {chain}]'; iptables -L {chain} -v -n 2>&1; "
+        f"if command -v ip6tables >/dev/null 2>&1; then "
+        f"echo '[ip6tables OUTPUT]'; ip6tables -L OUTPUT -v -n 2>&1; "
+        f"echo '[ip6tables {chain}]'; ip6tables -L {chain} -v -n 2>&1; fi"
+    )
+
+
+def _build_reject_network_diagnostics_script(uid: int) -> str:
+    """生成 REJECT 断网状态诊断脚本，只读取规则和计数器。"""
+    chain = "BBMA_REJECTNET"
     return (
         f"echo ipv4_rule=$([ $(iptables -C OUTPUT -m owner --uid-owner {uid} -j {chain} "
         f"2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "

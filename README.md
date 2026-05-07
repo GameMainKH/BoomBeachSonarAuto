@@ -12,9 +12,18 @@
 - 使用模板图片识别活动入口、登录按钮、退出按钮、母舰图标等 UI 元素。
 - 支持按关卡配置不同菱形网格边长。
 - 优先使用人工校准后的固定点位，点位缺失或数量不匹配时回退到自动识别。
-- 通过 root ADB shell 使用 iptables 按游戏 UID 开关弱网。
+- 通过 root ADB shell 使用 iptables 按游戏 UID 控制 DROP 弱网和 REJECT 断网。
 - 输出命中可视化图片。
-- 提供 PyQt6 调试工具，用于截图取点、裁剪模板、人工校准点位和弱网开关诊断。
+- 提供 PyQt6 调试工具，用于截图取点、裁剪模板、人工校准点位、弱网和断网开关诊断。
+
+## Update
+
+2026.5.7
+- 完全修复弱网不稳定问题使用 REJECT 断网消除本地缓存。
+- 优化程序流程，大幅加快运行速度。
+- 网络控制已区分为两类规则：DROP 弱网和 REJECT 断网。
+- REJECT 使用独立 `BBMA_REJECTNET`，TCP 流量会使用 `tcp-reset`，其他流量使用 ICMP unreachable，减少本地缓存和重传导致的阻塞数据包残留。
+- 弱网 GUI 已支持四个调试按钮：`开启弱网(DROP)`、`关闭弱网(DROP)`、`开启断网(REJECT)`、`关闭断网(REJECT)`。
 
 ## 项目结构
 
@@ -28,7 +37,7 @@
 │   ├── points.py              # 点位 JSON 读写、生成和读取工具
 │   └── points.json            # 人工/自动生成的固定点位数据
 ├── utils/
-│   ├── adb_control.py         # ADB 封装、手势、应用启动和弱网控制
+│   ├── adb_control.py         # ADB 封装、手势、应用启动和弱网/断网控制
 │   ├── image_match.py         # 模板匹配
 │   ├── diamond_centers.py     # 菱形网格检测与中心点计算
 │   ├── diamond_hit.py         # 点击前后截图对比与命中判断
@@ -36,7 +45,7 @@
 ├── _debug/
 │   ├── debug_gui.py           # 截图取点/模板裁剪 GUI
 │   ├── point_editor.py        # 人工点位校准 GUI
-│   ├── weak_network_gui.py    # 弱网开关与诊断 GUI
+│   ├── weak_network_gui.py    # 弱网与断网开关、诊断 GUI
 │   ├── screenshots/           # 调试截图输出
 │   └── logs/                  # 日志文件
 └── outputs/                   # 命中可视化结果输出
@@ -47,7 +56,7 @@
 - Python 3.10 或更高版本。
 - 已安装并可在命令行使用的 `adb`。
 - 一台已开启 ADB 调试的安卓设备或模拟器。
-- 设备需要支持 `adb root`，否则脚本无法使用 iptables 自动控制弱网。
+- 设备需要支持 `adb root`，否则脚本无法使用 iptables 自动控制弱网或断网。
 - 海岛奇兵国服（国际服未测试），如需使用请自行修改 `GAME_PACKAGE_NAME` 和流程坐标。
 - 建议使用雷电模拟器，并将分辨率设置为 `1280x720`。
 - 当前模板图片与设备分辨率、游戏界面语言、UI 状态尽量一致。
@@ -98,7 +107,7 @@ adb connect 127.0.0.1:5555
 
 如果你的设备不是 `127.0.0.1:5555`，请把 `config.py` 中的 `ADB_SERIAL` 改成 `adb devices` 显示的设备 ID。
 
-弱网控制依赖 root shell，运行主流程前建议确认：
+弱网和断网控制依赖 root shell，运行主流程前建议确认：
 
 ```powershell
 adb -s 127.0.0.1:5555 root
@@ -120,9 +129,11 @@ if __name__ == "__main__":
     level = 1
     try:
         adb.ensure_root_shell()
+        cleanup_reject_network("主流程启动")
         main(level)
     finally:
         cleanup_weak_network("主流程结束")
+        cleanup_reject_network("主流程结束")
 ```
 
 运行主程序：
@@ -165,15 +176,24 @@ python _debug/point_editor.py
 
 ## 弱网控制
 
-当前主流程已通过 ADB root + iptables 自动实现弱网，不再需要 QNET。脚本会在进入活动前开启游戏弱网，在重启游戏和退出脚本时关闭弱网。
+当前主流程已通过 ADB root + iptables 自动实现游戏网络控制，不再需要 QNET。脚本默认仍使用 DROP 弱网：进入活动前开启游戏弱网，在重启游戏和退出脚本时关闭弱网。
 
-也可以单独启动弱网调试工具：
+项目同时提供 REJECT 断网能力。REJECT 使用独立 `BBMA_REJECTNET` 链，适合调试需要让游戏网络快速失败的场景；它不是关闭整机 Wi-Fi 或移动数据，不会主动断开设备上其他应用的网络。
+
+也可以单独启动弱网/断网调试工具：
 
 ```powershell
 python _debug/weak_network_gui.py
 ```
 
-弱网调试工具支持手动开启/关闭目标游戏包名的弱网规则，并读取 iptables/ip6tables 诊断信息。专用日志保存到：
+弱网调试工具支持以下操作，并读取对应 iptables/ip6tables 诊断信息：
+
+- `开启弱网(DROP)`
+- `关闭弱网(DROP)`
+- `开启断网(REJECT)`
+- `关闭断网(REJECT)`
+
+专用日志保存到：
 
 ```text
 _debug/logs/weak_network_gui.log
@@ -213,7 +233,7 @@ python _debug/debug_gui.py
 python _debug/point_editor.py
 ```
 
-弱网开关与诊断 GUI：
+弱网与断网开关、诊断 GUI：
 
 ```powershell
 python _debug/weak_network_gui.py
@@ -260,16 +280,19 @@ adb connect <设备地址>
 
 然后同步修改 `config.py` 中的 `ADB_SERIAL`。
 
-### 无法开启弱网
+### 无法开启弱网或断网
 
 可能原因：
 
 - 当前设备不支持 `adb root`。
 - `adb shell id -u` 输出不是 `0`。
 - 设备缺少 `iptables`。
+- 设备缺少 `ip6tables` 时，IPv6 规则会被跳过，IPv4 规则仍会尝试生效。
 - 游戏包名配置不正确，导致无法读取 UID。
 
-主流程启动时会执行 `adb.ensure_root_shell()`。如果无法获得 root shell，脚本会中止，避免弱网控制弹出授权窗口或残留异常状态。
+主流程启动时会执行 `adb.ensure_root_shell()`。如果无法获得 root shell，脚本会中止，避免弱网或断网控制弹出授权窗口或残留异常状态。
+
+如果 REJECT 断网效果不明显，优先使用 `_debug/weak_network_gui.py` 查看 REJECT 诊断，确认 `BBMA_REJECTNET` 跳转规则和链内规则是否存在并被命中。
 
 ### 模板匹配失败
 

@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 outputs/*.png
 _debug/screenshots/*.png
+_debug/screenshots/run_debug/*.png
 _debug/logs/*.log
 
 save_points/dbg
