@@ -7,34 +7,22 @@ from time import sleep
 import cv2
 import numpy as np
 
-from config import GAME_PACKAGE_NAME, LEVEL_GRID_SIZES, USE_SAVED_POINTS, OUTPUT_DIR
+from config import (
+    GAME_PACKAGE_NAME,
+    LEVEL_GRID_SIZES,
+    OUTPUT_DIR,
+    SUBMARINES,
+    USE_SAVED_POINTS,
+)
 from save_points.points import read_saved_points, read_saved_quad
 from utils import AdbController, MatchResult, find_template, get_logger, is_diamond_hit
 from utils.diamond_centers import detect_diamond_centers, write_image
+from utils.submarine_strategy import Cell, SubmarineStrategy, get_configured_submarines
 
 logger = get_logger(__name__)
 adb = AdbController()
 _weak_network_cleanup_done = False
 ENABLE_WEAK_NETWORK_DIAGNOSTICS = True
-
-def set_qnet_and_start():
-    adb.open_app("com.tencent.wanluo.qnet")
-    adb.delay(2).click(321, 482) # 点击配置按钮
-    adb.delay(0.4).swipe(360, 1040, 360, 540) # 上滑展示全部选项
-    
-    adb.click(252, 600) # 单击 outloss
-    adb.delay(0.2).click(106, 660) # 点击输入框
-    adb.input_text("10")
-    adb.delay(0.2).click(585, 765) # 点击确定
-    
-    adb.click(252, 1072) # 单击 inloss
-    adb.delay(0.2).click(106, 660) # 点击输入框
-    adb.input_text("10")
-    adb.delay(0.2).click(585, 765) # 点击确定
-    
-    adb.delay(0.2).click(354, 1228) # 单击保存
-    adb.delay(0.2).click(341, 465) # 单击配置
-    adb.delay(0.2).click(354, 1228) # 单击开始测试
     
     
 def enter_account(img_path: str): # 暂未实现
@@ -214,47 +202,121 @@ def get_click_points(level: int, grid_img: np.ndarray) -> tuple[list[tuple[int, 
 
 
 def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray, np.ndarray]:
+    """处理单个关卡：有潜艇配置时策略选点，缺少配置时回退逐格扫描。"""
     # 获取当前关卡的棱形方格中心坐标列表
     adb.delay(1.5)
     # adb.pinch_in(distance=10, duration_ms=200) # 缩小视野，目前不需要
     grid_img = adb.read_screenshot()
     click_points, grid_quad = get_click_points(level, grid_img)
-    
-    for i, (x, y) in enumerate(click_points): # 遍历每个方格中心坐标
-        # if i != 0:
-        #     adb.pinch_in(distance=10, duration_ms=200)
-        if wait_until_occur("./template/quit_activity.png", timeout=6) is None:
-            logger.warning("点击方格前不在活动详情界面，重新进入活动后跳过本次点击")
-            enter_activity()
-            continue
 
-        before_img = adb.read_screenshot("./_debug/screenshots/run_debug/debug_before.png") # 点击前截图
-        adb.click(x, y)
-        adb.delay(0.3)
-        if not click_template("./template/quit_activity.png", "./_debug/screenshots/run_debug/debug_quit1.png"):
-            logger.warning("点击方格后未找到退出按钮，当前页面可能已离开活动详情界面")
-            enter_activity()
-            continue
-        
-        enter_activity(re_enter=True) # 重新进入活动界面
-        # adb.pinch_in(distance=10, duration_ms=200)
-        after_img = adb.delay(1).read_screenshot("./_debug/screenshots/run_debug/debug_after.png")
-        if is_diamond_hit(before_img, after_img, (x, y)):
-            square_size = get_level_grid_size(level)
-            hit_map[i//square_size][i%square_size] = 1
-            logger.info("第 %s 关，点击方格 %s 结果：击中！", level, i)
-        else:
-            logger.info("第 %s 关，点击方格 %s 结果：未击中", level, i)
-            
-
-        adb.enable_reject_network(GAME_PACKAGE_NAME)
-        retry = wait_until_occur("./template/retry.png", timeout=20)
-        adb.disable_reject_network(GAME_PACKAGE_NAME)
-        adb.delay(0.5).click(*retry.center) # 点击重试按钮
-        
-        restart_process()
+    submarines = get_configured_submarines(level, SUBMARINES)
+    if submarines is None:
+        message = f"第 {level} 关缺少潜艇长度配置，回退逐格扫描"
+        logger.warning(message)
+        print(message)
+        _scan_level_by_grid_order(level, hit_map, click_points)
+    else:
+        _scan_level_by_strategy(level, hit_map, click_points, submarines)
 
     return grid_img, grid_quad
+
+
+def _scan_level_by_grid_order(
+    level: int,
+    hit_map: list[list[int]],
+    click_points: list[tuple[int, int]],
+    skip_cells: set[Cell] | None = None,
+) -> None:
+    """按行优先顺序逐格探测，可跳过策略阶段已获得真实反馈的格子。"""
+    grid_size = get_level_grid_size(level)
+    skip_cells = skip_cells or set()
+    for index, point in enumerate(click_points): # 遍历每个方格中心坐标
+        cell = (index // grid_size, index % grid_size)
+        if cell in skip_cells:
+            continue
+        _probe_cell(level, hit_map, cell, point, index)
+
+
+def _scan_level_by_strategy(
+    level: int,
+    hit_map: list[list[int]],
+    click_points: list[tuple[int, int]],
+    submarines: list[int],
+) -> None:
+    """使用潜艇策略选择探测格；策略无法完成时回退扫描剩余未探测格。"""
+    grid_size = get_level_grid_size(level)
+    strategy = SubmarineStrategy(grid_size, submarines)
+    max_attempts = grid_size * grid_size
+    attempts = 0
+
+    logger.info("第 %s 关启用潜艇策略：grid=%s submarines=%s", level, grid_size, submarines)
+
+    while not strategy.done and attempts < max_attempts:
+        cell = strategy.choose_next_cell()
+        if cell is None:
+            logger.warning("第 %s 关策略已无可选方格，提前结束", level)
+            break
+
+        row, col = cell
+        index = row * grid_size + col
+        hit = _probe_cell(level, hit_map, cell, click_points[index], index)
+        attempts += 1
+
+        if hit is None:
+            continue
+
+        strategy.report_result(cell, hit)
+
+    if strategy.done:
+        logger.info("第 %s 关策略已确认全部潜艇，探测次数：%s", level, attempts)
+    else:
+        logger.warning("第 %s 关策略未能确认全部潜艇，回退逐格扫描未探测方格", level)
+        _scan_level_by_grid_order(level, hit_map, click_points, skip_cells=set(strategy.shots))
+
+
+def _probe_cell(
+    level: int,
+    hit_map: list[list[int]],
+    cell: Cell,
+    point: tuple[int, int],
+    index: int,
+) -> bool | None:
+    """执行一次单格探测，保持原自动化顺序；命中返回 True，未命中返回 False，页面异常返回 None。"""
+    x, y = point
+    # if i != 0:
+    #     adb.pinch_in(distance=10, duration_ms=200)
+    if wait_until_occur("./template/quit_activity.png", timeout=6) is None:
+        logger.warning("点击方格前不在活动详情界面，重新进入活动后跳过本次点击")
+        enter_activity()
+        return None
+
+    before_img = adb.read_screenshot("./_debug/screenshots/run_debug/debug_before.png") # 点击前截图
+    adb.click(x, y)
+    adb.delay(0.3)
+    if not click_template("./template/quit_activity.png", "./_debug/screenshots/run_debug/debug_quit1.png"):
+        logger.warning("点击方格后未找到退出按钮，当前页面可能已离开活动详情界面")
+        enter_activity()
+        return None
+
+    enter_activity(re_enter=True) # 重新进入活动界面
+    # adb.pinch_in(distance=10, duration_ms=200)
+    after_img = adb.delay(1).read_screenshot("./_debug/screenshots/run_debug/debug_after.png")
+    if is_diamond_hit(before_img, after_img, (x, y)):
+        row, col = cell
+        hit_map[row][col] = 1
+        logger.info("第 %s 关，点击方格 %s 结果：击中！", level, index)
+        hit = True
+    else:
+        logger.info("第 %s 关，点击方格 %s 结果：未击中", level, index)
+        hit = False
+
+    adb.enable_reject_network(GAME_PACKAGE_NAME)
+    retry = wait_until_occur("./template/retry.png", timeout=20)
+    adb.disable_reject_network(GAME_PACKAGE_NAME)
+    adb.delay(0.5).click(*retry.center) # 点击重试按钮
+
+    restart_process()
+    return hit
         
 def restart_process():
     disable_weak_network()
@@ -273,7 +335,7 @@ def wait_until_occur(template_path: str, timeout: float = 30.0) -> MatchResult |
         match_result = find_template(screenshot, template_path)
         if match_result is not None:
             return match_result
-        sleep(1)  # 每隔 1 秒检查一次
+        sleep(0.5)  # 每隔 0.5 秒检查一次
     logger.warning("等待模板 '%s' 超时 (%s 秒)", template_path, timeout)
     return None
 
@@ -305,7 +367,6 @@ def main(level: int):
     
 
 if __name__ == "__main__":
-    # set_qnet_and_start()
     register_exit_cleanup()
     level = 1
     try:
