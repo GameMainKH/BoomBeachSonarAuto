@@ -2,4 +2,4 @@
 from utils import AdbController
 
 adb = AdbController()
-adb.take_screenshot(r".\save_points\imgs\11.png")
+adb.take_screenshot(r".\save_points\imgs\14.png")

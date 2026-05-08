@@ -81,7 +81,7 @@ def enter_activity(re_enter: bool = False) -> None:
         logger.error("未找到活动按钮，无法进入活动界面，重试中...")
         adb.close_app(GAME_PACKAGE_NAME)
         adb.delay(1.5).open_app(GAME_PACKAGE_NAME)
-        login_img = wait_until_occur("./template/login.png", timeout=20)
+        login_img = wait_until_occur("./template/login.png", timeout=30)
         adb.click(*login_img.center) # 点击登录按钮
         return enter_activity()
 
@@ -92,7 +92,7 @@ def enter_activity(re_enter: bool = False) -> None:
         adb.delay(0.2).swipe(1000, 660, 1000, 180) 
     
     adb.delay(0.7).click(1205, 644) # 点击进入活动详情界面
-    if wait_until_occur("./template/quit_activity.png", timeout=10) is None:
+    if wait_until_occur("./template/quit_activity.png", timeout=15) is None:
         logger.warning("进入活动详情界面失败，重新尝试进入活动")
         return enter_activity()
     
