@@ -313,7 +313,7 @@ def _probe_cell(
     adb.enable_reject_network(GAME_PACKAGE_NAME)
     retry = wait_until_occur("./template/retry.png", timeout=20)
     adb.disable_reject_network(GAME_PACKAGE_NAME)
-    adb.delay(0.5).click(*retry.center) # 点击重试按钮
+    adb.delay(0.8).click(*retry.center) # 点击重试按钮
 
     restart_process()
     return hit

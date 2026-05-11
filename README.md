@@ -15,15 +15,20 @@
 - 舍弃原有全海域迭代，使用潜艇搜索策略减少实际探测次数。
 - 优先使用人工校准后的固定点位，点位缺失或数量不匹配时回退到自动识别。
 - 通过 root ADB shell 使用 iptables 按游戏 UID 控制 DROP 弱网和 REJECT 断网。
-- 输出命中可视化图片。
-- 提供 PyQt6 调试工具，用于截图取点、裁剪模板、人工校准点位、弱网和断网开关诊断。
+- 提供声呐潜艇命中可视化图片。
+- 提供 PyQt6 调试工具，用于实时坐标查看、鼠标手势标点、ROI 选区、完整截图保存、模板保存、人工校准点位、弱网和断网开关诊断。
 
 ## Update
+
+2026.5.12
+- 更新了 _debug/debug_gui.py 添加了完整截图保存记忆鼠标左右键选中的款姐操作
+- 修正了 README 的部分内容
+- 调整断网延迟，降低重试时仍断网的几率
 
 2026.5.8
 - 已修复全部已知问题。
 - 舍弃原有全海域逐格迭代，改用潜艇搜索策略，大幅加快探索速度。
-- 当前已完全支持 1 至 ~~11~~36 号海域的自动化搜索算法探索。
+- 当前已完全支持 1 至 ~~11~~ 36 号海域的自动化搜索算法探索。
 - 缺少潜艇长度配置的海域会提示并回退逐格扫描；用户也可以按文档手动添加后续海域支持。
 - 添加对自动化搜索算法的单元测试。
 - 强行支持 1 ~ 36 海域（其实就是复用14号海域，后续海域重复无变化）
@@ -56,7 +61,7 @@
 │   └── logger.py              # 日志配置
 ├── tests/                     # 策略单元测试
 ├── _debug/
-│   ├── debug_gui.py           # 截图取点/模板裁剪 GUI
+│   ├── debug_gui.py           # 实时坐标/手势标点/ROI 选区/模板保存 GUI
 │   ├── point_editor.py        # 人工点位校准 GUI
 │   ├── weak_network_gui.py    # 弱网与断网开关、诊断 GUI
 │   ├── screenshots/           # 调试截图输出
@@ -103,7 +108,7 @@ source .venv/bin/activate
 | `SCREENSHOT_DIR` | `_debug/screenshots/` | 截图和运行调试图保存目录 |
 | `LOG_FILE` | `_debug/logs/bbma.log` | 主流程日志文件路径 |
 | `OUTPUT_DIR` | `outputs/` | 命中可视化图片输出目录 |
-| `LEVEL_GRID_SIZES` | `1: 3` 到 `20: 10` | 各海域对应的菱形网格边长 |
+| `LEVEL_GRID_SIZES` | `1: 3` 到 `36: 10` | 各海域对应的菱形网格边长 |
 | `SUBMARINES` | `1` 到 `36` | 各海域潜艇长度列表；后续海域需手动填写 |
 | `USE_SAVED_POINTS` | `True` | 是否优先使用 `save_points/points.json` 中的人工点位 |
 | `SAVED_POINTS_FILE` | `save_points/points.json` | 固定点位 JSON 文件 |
@@ -121,7 +126,7 @@ adb connect 127.0.0.1:5555
 
 如果你的设备不是 `127.0.0.1:5555`，请把 `config.py` 中的 `ADB_SERIAL` 改成 `adb devices` 显示的设备 ID。
 
-弱网和断网控制依赖 root shell，运行主流程前建议确认：
+弱网和断网控制依赖 root shell，运行 main.py 前建议确认：
 
 ```powershell
 adb -s 127.0.0.1:5555 root
@@ -210,9 +215,9 @@ python _debug/point_editor.py
 
 ## 弱网控制
 
-当前主流程已通过 ADB root + iptables 自动实现游戏网络控制，不再需要 QNET。脚本默认仍使用 DROP 弱网：进入活动前开启游戏弱网，在重启游戏和退出脚本时关闭弱网。
+当前主流程已通过 ADB root + iptables 自动实现游戏网络控制，不再需要 QNET。脚本在进入活动前开启游戏弱网，在重启游戏和退出脚本时关闭弱网。
 
-项目同时提供 REJECT 断网能力。REJECT 使用独立 `BBMA_REJECTNET` 链，适合调试需要让游戏网络快速失败的场景；它不是关闭整机 Wi-Fi 或移动数据，不会主动断开设备上其他应用的网络。
+项目同时提供 REJECT 断网能力。REJECT 使用独立 `BBMA_REJECTNET` 链，它并不会关闭整机 Wi-Fi 或移动数据。
 
 也可以单独启动弱网/断网调试工具：
 
@@ -235,21 +240,15 @@ _debug/logs/weak_network_gui.log
 
 ## 图片说明
 
-旧版 QNET 配置参考
-~~Qnet配置：~~
-<p align="left"><img src="docs/images/qnet.png" width="400"></p>
-
-当前版本主流程不再依赖 QNET，但仍需手动登录进主界面
-~~启动脚本前应确保Qnet如图所示：~~
+启动脚本前需手动登录进主界面（如图）：
 <p align="left"><img src="docs/images/home.png" height="400"></p>
 
 最终输出示例，红色方框即为潜艇：
-
-<p align="left"><img src="docs/images/hit_map_level_1.png" height="400"></p>
+<p align="left"><img src="docs/images/hit_map_level_18.png" height="400"></p>
 
 ## 调试工具
 
-截图取点和模板裁剪 GUI：
+截图调试和模板裁剪 GUI：
 
 ```powershell
 python _debug/debug_gui.py
@@ -257,9 +256,10 @@ python _debug/debug_gui.py
 
 常见用途：
 
-- 模板匹配失败时，重新裁剪 `template/` 下的图片。
-- 自动点击位置不准时，检查截图分辨率和坐标。
-- 新设备或新分辨率适配时，更新关键 UI 模板。
+- 自动点击位置不准时，查看鼠标实时坐标，左键单击标点，或输入 x/y 坐标跳转标记。
+- 需要完整模拟器画面时，直接保存当前完整截图，避免拖拽裁剪漏掉边缘像素。
+- 需要取消时，右键点标记可删除标记，右键空白或 ROI 区域可清除当前 ROI。
+- 新设备或新分辨率适配时，可根据自己的模拟器左键拖拽（亦可查看查看 ROI 的 `x, y, w, h`）选中 ROI 后保存到 `template/` 下，更新关键模板。
 
 人工点位校准 GUI：
 
@@ -283,6 +283,7 @@ python _debug/weak_network_gui.py
 | `template/login.png` | 登录按钮 |
 | `template/quit_activity.png` | 活动详情页退出按钮 |
 | `template/ship.png` | 母舰图标 |
+| `template/retry.png` | 断网重试图标 |
 
 `template/qnet_button_off.png`，为旧版 QNET 流程参考；当前主流程不再依赖该模板。
 
@@ -321,7 +322,6 @@ adb connect <设备地址>
 - 当前设备不支持 `adb root`。
 - `adb shell id -u` 输出不是 `0`。
 - 设备缺少 `iptables`。
-- 设备缺少 `ip6tables` 时，IPv6 规则会被跳过，IPv4 规则仍会尝试生效。
 - 游戏包名配置不正确，导致无法读取 UID。
 
 主流程启动时会执行 `adb.ensure_root_shell()`。如果无法获得 root shell，脚本会中止，避免弱网或断网控制弹出授权窗口或残留异常状态。
@@ -332,11 +332,10 @@ adb connect <设备地址>
 
 可能原因：
 
-- 模板图片与当前分辨率不一致。
-- 游戏界面语言、缩放或 UI 状态不同。
+- 模板图片与当前分辨率不一致（请设置为1280*720）。
 - 模板区域裁剪过大或包含动态背景。
 
-可以使用 `_debug/debug_gui.py` 重新裁剪模板，并适当调整 `DEFAULT_MATCH_THRESHOLD`。
+可以使用 `_debug/debug_gui.py` 左键拖拽 ROI 并保存为模板，再适当调整 `DEFAULT_MATCH_THRESHOLD`。
 
 ### 菱形网格识别失败
 
@@ -344,7 +343,7 @@ adb connect <设备地址>
 
 - 截图中网格区域被遮挡。
 - 当前画面不是活动详情页。
-- 网格颜色、边框或背景变化明显。
+- 使用了特殊的海岛基地皮肤（建议换为原版）。
 - 当前关卡没有人工点位，且自动识别没有找到稳定外框。
 
 建议优先使用 `_debug/point_editor.py` 为该关卡保存人工点位。也可以查看 `_debug/screenshots/` 下的中间图片，确认程序检测到的外框是否正确。
