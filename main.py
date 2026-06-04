@@ -9,6 +9,7 @@ import numpy as np
 
 from config import (
     GAME_PACKAGE_NAME,
+    IS_INTERNATIONAL_VERSION,
     LEVEL_GRID_SIZES,
     OUTPUT_DIR,
     SUBMARINES,
@@ -23,10 +24,11 @@ logger = get_logger(__name__)
 adb = AdbController()
 _weak_network_cleanup_done = False
 ENABLE_WEAK_NETWORK_DIAGNOSTICS = True
-    
-    
-def enter_account(img_path: str): # 暂未实现
+
+
+def enter_account(img_path: str):  # 暂未实现
     pass
+
 
 def enable_weak_network(second: float = 0) -> None:
     """开启游戏弱网，并按需等待网络状态生效。"""
@@ -34,11 +36,13 @@ def enable_weak_network(second: float = 0) -> None:
     if second > 0:
         sleep(second)
 
+
 def disable_weak_network(second: float = 0) -> None:
     """关闭游戏弱网，并按需等待网络状态恢复。"""
     adb.disable_weak_network(GAME_PACKAGE_NAME)
     if second > 0:
         sleep(second)
+
 
 def cleanup_weak_network(reason: str = "脚本退出") -> None:
     """脚本退出时关闭游戏弱网，防止影响游戏正常运行"""
@@ -53,6 +57,7 @@ def cleanup_weak_network(reason: str = "脚本退出") -> None:
     except Exception as exc:
         logger.error("关闭弱网失败: %s", exc)
 
+
 def cleanup_reject_network(reason: str = "脚本退出") -> None:
     """关闭游戏 REJECT 断网残留，避免影响本次或下次运行。"""
     try:
@@ -61,10 +66,12 @@ def cleanup_reject_network(reason: str = "脚本退出") -> None:
     except Exception as exc:
         logger.error("清理 REJECT 断网失败: %s", exc)
 
+
 def handle_exit_signal(signum: int, _frame) -> None:
     """收到退出信号时先关闭弱网再退出。"""
     cleanup_weak_network(f"收到退出信号 {signum}")
     raise SystemExit(128 + signum)
+
 
 def register_exit_cleanup() -> None:
     """注册脚本退出清理，尽量避免弱网规则残留。"""
@@ -74,6 +81,7 @@ def register_exit_cleanup() -> None:
         if signum is not None:
             signal.signal(signum, handle_exit_signal)
 
+
 def enter_activity(re_enter: bool = False) -> None:
     adb.delay(0.5)
     res = wait_until_occur("./template/activity_button.png", timeout=20)
@@ -81,21 +89,54 @@ def enter_activity(re_enter: bool = False) -> None:
         logger.error("未找到活动按钮，无法进入活动界面，重试中...")
         adb.close_app(GAME_PACKAGE_NAME)
         adb.delay(1.5).open_app(GAME_PACKAGE_NAME)
-        login_img = wait_until_occur("./template/login.png", timeout=30)
-        adb.click(*login_img.center) # 点击登录按钮
+
+        if not IS_INTERNATIONAL_VERSION:
+            # 国内版需要点击登录按钮
+            login_img = wait_until_occur("./template/login.png", timeout=30)
+            adb.click(*login_img.center)  # 点击登录按钮
+        else:
+            # 国际版无需登录，等待活动按钮直接出现
+            logger.info("国际版无需登录，等待进入")
+
         return enter_activity()
 
-    adb.click(*res.center) # 点击活动按钮进入活动界面
+    # 等待声纳活动图标出现
+    adb.delay(1)
+
+    adb.click(*res.center)  # 点击活动按钮进入活动界面
     if not re_enter:
-        enable_weak_network(0.2)
-        adb.delay(0.4).swipe(1000, 660, 1000, 180) # 上滑展示全部选项（仅第一次进入需要）
-        adb.delay(0.2).swipe(1000, 660, 1000, 180) 
-    
-    adb.delay(0.7).click(1205, 644) # 点击进入活动详情界面
+        adb.delay(0.4).swipe(
+            1000, 660, 1000, 180
+        )  # 上滑展示全部选项（仅第一次进入需要）
+        adb.delay(0.2).swipe(1000, 660, 1000, 180)
+
+    sonar_activity = wait_until_occur("./template/sonar_activity.png", timeout=5)
+    if sonar_activity is None:
+        logger.warning("声纳活动图标未出现，关闭活动列表并修复网络问题")
+        # 关闭活动列表
+        close_btn = wait_until_occur("./template/close_activity_button.png", timeout=5)
+        if close_btn is not None:
+            adb.click(*close_btn.center)
+            adb.delay(0.5)
+
+        # 修复网络问题
+        disable_weak_network()
+        cleanup_reject_network()
+        adb.delay(1)
+
+        # 重新进入活动
+        logger.info("网络修复完成，重新进入活动")
+        return enter_activity()
+
+    enable_weak_network(0.2)
+    # 点击原有的位置进入声纳活动详情界面（不点击sonar_activity的center）
+    adb.delay(0.7).click(1205, 644)
+
+    # 验证进入了活动详情界面
     if wait_until_occur("./template/quit_activity.png", timeout=15) is None:
         logger.warning("进入活动详情界面失败，重新尝试进入活动")
         return enter_activity()
-    
+
 
 def _build_cell_polygons(quad: np.ndarray, n: int) -> list[list[np.ndarray]]:
     """根据外层菱形四角生成每个方格的四边形坐标。"""
@@ -180,7 +221,9 @@ def get_level_grid_size(level: int) -> int:
     return LEVEL_GRID_SIZES[level]
 
 
-def get_click_points(level: int, grid_img: np.ndarray) -> tuple[list[tuple[int, int]], np.ndarray]:
+def get_click_points(
+    level: int, grid_img: np.ndarray
+) -> tuple[list[tuple[int, int]], np.ndarray]:
     """按配置读取人工点位，失败时回退到自动识别。"""
     grid_size = get_level_grid_size(level)
 
@@ -201,7 +244,9 @@ def get_click_points(level: int, grid_img: np.ndarray) -> tuple[list[tuple[int, 
     return grid_result.points, grid_result.global_quad
 
 
-def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray, np.ndarray]:
+def handle_game_level(
+    level: int, hit_map: list[list[int]]
+) -> tuple[np.ndarray, np.ndarray]:
     """处理单个关卡：有潜艇配置时策略选点，缺少配置时回退逐格扫描。"""
     # 获取当前关卡的棱形方格中心坐标列表
     adb.delay(1.5)
@@ -230,7 +275,7 @@ def _scan_level_by_grid_order(
     """按行优先顺序逐格探测，可跳过策略阶段已获得真实反馈的格子。"""
     grid_size = get_level_grid_size(level)
     skip_cells = skip_cells or set()
-    for index, point in enumerate(click_points): # 遍历每个方格中心坐标
+    for index, point in enumerate(click_points):  # 遍历每个方格中心坐标
         cell = (index // grid_size, index % grid_size)
         if cell in skip_cells:
             continue
@@ -249,7 +294,9 @@ def _scan_level_by_strategy(
     max_attempts = grid_size * grid_size
     attempts = 0
 
-    logger.info("第 %s 关启用潜艇策略：grid=%s submarines=%s", level, grid_size, submarines)
+    logger.info(
+        "第 %s 关启用潜艇策略：grid=%s submarines=%s", level, grid_size, submarines
+    )
 
     while not strategy.done and attempts < max_attempts:
         cell = strategy.choose_next_cell()
@@ -271,7 +318,9 @@ def _scan_level_by_strategy(
         logger.info("第 %s 关策略已确认全部潜艇，探测次数：%s", level, attempts)
     else:
         logger.warning("第 %s 关策略未能确认全部潜艇，回退逐格扫描未探测方格", level)
-        _scan_level_by_grid_order(level, hit_map, click_points, skip_cells=set(strategy.shots))
+        _scan_level_by_grid_order(
+            level, hit_map, click_points, skip_cells=set(strategy.shots)
+        )
 
 
 def _probe_cell(
@@ -290,17 +339,26 @@ def _probe_cell(
         enter_activity()
         return None
 
-    before_img = adb.read_screenshot("./_debug/screenshots/run_debug/debug_before.png") # 点击前截图
+    # 确保弱网已开启
+    enable_weak_network()
+
+    before_img = adb.read_screenshot(
+        "./_debug/screenshots/run_debug/debug_before.png"
+    )  # 点击前截图
     adb.click(x, y)
     adb.delay(0.3)
-    if not click_template("./template/quit_activity.png", "./_debug/screenshots/run_debug/debug_quit1.png"):
+    if not click_template(
+        "./template/quit_activity.png", "./_debug/screenshots/run_debug/debug_quit1.png"
+    ):
         logger.warning("点击方格后未找到退出按钮，当前页面可能已离开活动详情界面")
         enter_activity()
         return None
 
-    enter_activity(re_enter=True) # 重新进入活动界面
+    enter_activity(re_enter=True)  # 重新进入活动界面
     # adb.pinch_in(distance=10, duration_ms=200)
-    after_img = adb.delay(1).read_screenshot("./_debug/screenshots/run_debug/debug_after.png")
+    after_img = adb.delay(1).read_screenshot(
+        "./_debug/screenshots/run_debug/debug_after.png"
+    )
     if is_diamond_hit(before_img, after_img, (x, y)):
         row, col = cell
         hit_map[row][col] = 1
@@ -313,19 +371,22 @@ def _probe_cell(
     adb.enable_reject_network(GAME_PACKAGE_NAME)
     retry = wait_until_occur("./template/retry.png", timeout=20)
     adb.disable_reject_network(GAME_PACKAGE_NAME)
-    adb.delay(0.8).click(*retry.center) # 点击重试按钮
+    adb.delay(0.8).click(*retry.center)  # 点击重试按钮
 
     restart_process()
     return hit
-        
+
+
 def restart_process():
     disable_weak_network()
     enter_activity()
-    
+
+
 def is_hit():
     img = adb.read_screenshot()
-    return find_template(img, "./template/hit.png", threshold=0.9) is not None  
-        
+    return find_template(img, "./template/hit.png", threshold=0.9) is not None
+
+
 def wait_until_occur(template_path: str, timeout: float = 30.0) -> MatchResult | None:
     """等待直到指定模板出现，返回匹配结果或 None（超时）。"""
     logger.info("正在等待模板 '%s' 出现，超时时间 %s 秒...", template_path, timeout)
@@ -339,7 +400,10 @@ def wait_until_occur(template_path: str, timeout: float = 30.0) -> MatchResult |
     logger.warning("等待模板 '%s' 超时 (%s 秒)", template_path, timeout)
     return None
 
-def click_template(template_path: str, screenshot_path: str | None = None, threshold: float = 0.85) -> bool:
+
+def click_template(
+    template_path: str, screenshot_path: str | None = None, threshold: float = 0.85
+) -> bool:
     """查找模板并点击中心点，找不到时返回 False。"""
     img = adb.read_screenshot(screenshot_path)
     match_result = find_template(img, template_path, threshold=threshold)
@@ -349,26 +413,27 @@ def click_template(template_path: str, screenshot_path: str | None = None, thres
     adb.delay(0.5).click(*match_result.center)
     return True
 
+
 def main(level: int):
     grid_size = get_level_grid_size(level)
     hit_map = [[0 for i in range(grid_size)] for j in range(grid_size)]
     disable_weak_network()
-    
+
     if not find_template(adb.read_screenshot(), "./template/activity_button.png"):
         logger.error("当前不在海岛主界面，无法启动脚本")
         return
-    
+
     enter_activity()
     base_img, quad = handle_game_level(level, hit_map)
     out_path = OUTPUT_DIR / f"hit_map_level_{level}.png"
     save_hit_map_image(base_img, quad, hit_map, out_path)
     print(hit_map)
     print(f"命中可视化图片已保存：{out_path}")
-    
+
 
 if __name__ == "__main__":
     register_exit_cleanup()
-    level = 1
+    level = 16
     try:
         adb.ensure_root_shell()
         cleanup_reject_network("主流程启动")
@@ -376,4 +441,3 @@ if __name__ == "__main__":
     finally:
         cleanup_weak_network("主流程结束")
         cleanup_reject_network("主流程结束")
-    
