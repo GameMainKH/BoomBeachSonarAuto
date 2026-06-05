@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 
 class AdbCommandError(RuntimeError):
-    """  adb 命令执行失败时抛出，包含命令和结果信息。"""
+    """adb 命令执行失败时抛出，包含命令和结果信息。"""
 
     def __init__(self, command: list[str], result: subprocess.CompletedProcess[str]):
         self.command = command
@@ -23,7 +23,6 @@ class AdbCommandError(RuntimeError):
 
 
 class AdbController:
-
     def __init__(self, serial: str = ADB_SERIAL, auto_connect: bool = True):
         self.serial = serial
         self._touch_device_info: tuple[str, int, int, int, int] | None = None
@@ -31,14 +30,19 @@ class AdbController:
         self._root_shell_ready = False
         self._package_uid_cache: dict[str, int] = {}
         self._ip6tables_available: bool | None = None
+        self._iptables_owner_match_available: dict[str, bool] = {}
         self._weak_network_enabled_uids: set[int] = set()
         self._reject_network_enabled_uids: set[int] = set()
+        self._global_weak_network_enabled: bool = False
+        self._global_reject_network_enabled: bool = False
         if auto_connect:
             self.connect()
         logger.info("adb 控制器已初始化: %s", self.serial)
 
-    def _run(self, args: list[str], *, device: bool = True, check: bool = True) -> subprocess.CompletedProcess[str]:
-        ''' 执行 adb 命令，自动添加设备参数。 '''
+    def _run(
+        self, args: list[str], *, device: bool = True, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        """执行 adb 命令，自动添加设备参数。"""
         command = ["adb"]
         if device:
             command.extend(["-s", self.serial])
@@ -46,7 +50,12 @@ class AdbController:
 
         logger.debug("执行 adb 命令: %s", " ".join(command))
         result = subprocess.run(command, capture_output=True, text=True)
-        if check and device and result.returncode != 0 and self._is_recoverable_adb_error(result):
+        if (
+            check
+            and device
+            and result.returncode != 0
+            and self._is_recoverable_adb_error(result)
+        ):
             logger.warning(
                 "ADB 连接异常，正在重连并重试: command=%s stdout=%r stderr=%r",
                 " ".join(command),
@@ -71,6 +80,16 @@ class AdbController:
     def ip(self) -> str:
         return self.serial
 
+    def _get_adb_tcp_port(self) -> int | None:
+        """从 adb serial 中解析 TCP 端口，如 127.0.0.1:5555 或 emulator-5554。"""
+        match = re.search(r"(?:(?:.*:)|(?:.*-))(\d+)$", self.serial)
+        if match is None:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
     def get_screen_size(self) -> tuple[int, int]:
         """获取系统报告的屏幕大小，返回宽度和高度。"""
         result = self._run(["shell", "wm", "size"])
@@ -89,7 +108,11 @@ class AdbController:
 
     def take_screenshot(self, output_path: str | Path | None = None) -> Path:
         """使用 adb 截图并保存到本地，返回截图路径。"""
-        path = Path(output_path) if output_path else SCREENSHOT_DIR / DEFAULT_SCREENSHOT_NAME
+        path = (
+            Path(output_path)
+            if output_path
+            else SCREENSHOT_DIR / DEFAULT_SCREENSHOT_NAME
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
 
         remote_path = "/sdcard/_bbma_screen.png"
@@ -132,15 +155,17 @@ class AdbController:
         if not package_name:
             _raise_value_error("包名不能为空")
 
-        self._run([
-            "shell",
-            "monkey",
-            "-p",
-            package_name,
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "1",
-        ])
+        self._run(
+            [
+                "shell",
+                "monkey",
+                "-p",
+                package_name,
+                "-c",
+                "android.intent.category.LAUNCHER",
+                "1",
+            ]
+        )
         logger.info("已通过包名启动 APP: %s", package_name)
 
     def close_app(self, package_name: str) -> None:
@@ -199,11 +224,22 @@ class AdbController:
             _raise_value_error("包名不能为空")
 
         uid = self._get_package_uid(package_name)
-        script = _build_weak_network_diagnostics_script(uid)
+        if self._is_iptables_owner_match_available("iptables"):
+            script = _build_weak_network_diagnostics_script(uid)
+            mode = "uid"
+        else:
+            script = _build_global_weak_network_diagnostics_script()
+            mode = "global"
+
         result = self._run_privileged_script(script, check=False)
         output = result.stdout.strip()
         error = result.stderr.strip()
-        sections = [f"package={package_name}", f"uid={uid}", f"returncode={result.returncode}"]
+        sections = [
+            f"package={package_name}",
+            f"uid={uid}",
+            f"mode={mode}",
+            f"returncode={result.returncode}",
+        ]
         if output:
             sections.append(output)
         if error:
@@ -217,11 +253,22 @@ class AdbController:
             _raise_value_error("包名不能为空")
 
         uid = self._get_package_uid(package_name)
-        script = _build_reject_network_diagnostics_script(uid)
+        if self._is_iptables_owner_match_available("iptables"):
+            script = _build_reject_network_diagnostics_script(uid)
+            mode = "uid"
+        else:
+            script = _build_global_reject_network_diagnostics_script()
+            mode = "global"
+
         result = self._run_privileged_script(script, check=False)
         output = result.stdout.strip()
         error = result.stderr.strip()
-        sections = [f"package={package_name}", f"uid={uid}", f"returncode={result.returncode}"]
+        sections = [
+            f"package={package_name}",
+            f"uid={uid}",
+            f"mode={mode}",
+            f"returncode={result.returncode}",
+        ]
         if output:
             sections.append(output)
         if error:
@@ -249,7 +296,9 @@ class AdbController:
         self.connect()
         sleep(0.5)
         if not self._is_root_shell():
-            raise RuntimeError("当前设备无法通过 adb root 获得 root shell，弱网控制会触发授权弹窗，已中止")
+            raise RuntimeError(
+                "当前设备无法通过 adb root 获得 root shell，弱网控制会触发授权弹窗，已中止"
+            )
 
         self._root_shell_ready = True
         logger.info("adb shell root 已准备就绪")
@@ -315,12 +364,18 @@ class AdbController:
         duration_ms = _validate_duration(duration_ms)
         inner_offset = _calculate_pinch_inner_offset()
 
-        left_start = _clamp_point(center_x - inner_offset - distance, center_y, width, height)
+        left_start = _clamp_point(
+            center_x - inner_offset - distance, center_y, width, height
+        )
         left_end = _clamp_point(center_x - inner_offset, center_y, width, height)
-        right_start = _clamp_point(center_x + inner_offset + distance, center_y, width, height)
+        right_start = _clamp_point(
+            center_x + inner_offset + distance, center_y, width, height
+        )
         right_end = _clamp_point(center_x + inner_offset, center_y, width, height)
 
-        self._run_two_finger_swipe(left_start, left_end, right_start, right_end, duration_ms, (width, height))
+        self._run_two_finger_swipe(
+            left_start, left_end, right_start, right_end, duration_ms, (width, height)
+        )
         logger.info(
             "双指向内划: center=(%s, %s) distance=%s duration_ms=%s",
             center_x,
@@ -342,11 +397,17 @@ class AdbController:
         inner_offset = _calculate_pinch_inner_offset()
 
         left_start = _clamp_point(center_x - inner_offset, center_y, width, height)
-        left_end = _clamp_point(center_x - inner_offset - distance, center_y, width, height)
+        left_end = _clamp_point(
+            center_x - inner_offset - distance, center_y, width, height
+        )
         right_start = _clamp_point(center_x + inner_offset, center_y, width, height)
-        right_end = _clamp_point(center_x + inner_offset + distance, center_y, width, height)
+        right_end = _clamp_point(
+            center_x + inner_offset + distance, center_y, width, height
+        )
 
-        self._run_two_finger_swipe(left_start, left_end, right_start, right_end, duration_ms, (width, height))
+        self._run_two_finger_swipe(
+            left_start, left_end, right_start, right_end, duration_ms, (width, height)
+        )
         logger.info(
             "双指向外划: center=(%s, %s) distance=%s duration_ms=%s",
             center_x,
@@ -361,7 +422,9 @@ class AdbController:
         self._run(["shell", "input", "text", escaped_text])
         logger.info("输入文本: %s", text)
 
-    def drag(self, start_x: int, start_y: int, end_x: int, end_y: int, duration_ms: int = 800) -> None:
+    def drag(
+        self, start_x: int, start_y: int, end_x: int, end_y: int, duration_ms: int = 800
+    ) -> None:
         """从指定起点拖动到指定终点。"""
         duration_ms = _validate_duration(duration_ms)
         start_x = _to_int("start_x", start_x)
@@ -369,16 +432,18 @@ class AdbController:
         end_x = _to_int("end_x", end_x)
         end_y = _to_int("end_y", end_y)
 
-        self._run([
-            "shell",
-            "input",
-            "swipe",
-            str(start_x),
-            str(start_y),
-            str(end_x),
-            str(end_y),
-            str(duration_ms),
-        ])
+        self._run(
+            [
+                "shell",
+                "input",
+                "swipe",
+                str(start_x),
+                str(start_y),
+                str(end_x),
+                str(end_y),
+                str(duration_ms),
+            ]
+        )
         logger.info(
             "拖动屏幕: start=(%s, %s) end=(%s, %s) duration_ms=%s",
             start_x,
@@ -425,7 +490,7 @@ class AdbController:
         self._run(["kill-server"], device=False)
         self._run(["start-server"], device=False)
         self.connect()
-        
+
     def delay(self, seconds: float):
         """等待指定秒数，方便在自动化步骤之间插入延迟。"""
         seconds = float(seconds)
@@ -436,17 +501,24 @@ class AdbController:
 
     @staticmethod
     def _parse_wm_size(output: str) -> tuple[int, int]:
-        ''' 解析 adb shell wm size 输出，返回宽度和高度。 '''
+        """解析 adb shell wm size 输出，返回宽度和高度。"""
         size_str = output.strip().split()[-1]
         width, height = map(int, size_str.split("x"))
         return width, height
 
-    def _resolve_gesture_center(self, center: tuple[int, int] | None) -> tuple[int, int, int, int]:
+    def _resolve_gesture_center(
+        self, center: tuple[int, int] | None
+    ) -> tuple[int, int, int, int]:
         """解析手势中心点，并返回中心坐标和截图尺寸。"""
         width, height = self.get_screenshot_size()
         if center is None:
             return width // 2, height // 2, width, height
-        return _to_int("center[0]", center[0]), _to_int("center[1]", center[1]), width, height
+        return (
+            _to_int("center[0]", center[0]),
+            _to_int("center[1]", center[1]),
+            width,
+            height,
+        )
 
     def _run_two_finger_swipe(
         self,
@@ -499,8 +571,12 @@ class AdbController:
         if package_name in self._package_uid_cache:
             return self._package_uid_cache[package_name]
 
-        result = self._run(["shell", "cmd", "package", "list", "packages", "-U", package_name])
-        uid_match = re.search(rf"package:{re.escape(package_name)}\s+uid:(\d+)", result.stdout)
+        result = self._run(
+            ["shell", "cmd", "package", "list", "packages", "-U", package_name]
+        )
+        uid_match = re.search(
+            rf"package:{re.escape(package_name)}\s+uid:(\d+)", result.stdout
+        )
         if uid_match is None:
             _raise_value_error(f"未找到包名对应的 UID: {package_name}")
         uid = int(uid_match.group(1))
@@ -510,67 +586,168 @@ class AdbController:
     def _set_weak_network_rule(self, uid: int, *, enabled: bool) -> None:
         """配置 IPv4/IPv6 的按 UID 弱网规则。"""
         action = "开启" if enabled else "关闭"
-        if enabled and uid in self._weak_network_enabled_uids:
-            if self._is_weak_network_rule_active(uid):
-                logger.info("APP 弱网已开启，跳过重复设置: uid=%s", uid)
-                return
-            logger.warning("本地缓存显示弱网已开启，但规则不存在，正在重新设置: uid=%s", uid)
-            self._weak_network_enabled_uids.discard(uid)
+        if self._is_iptables_owner_match_available("iptables"):
+            if enabled and uid in self._weak_network_enabled_uids:
+                if self._is_weak_network_rule_active(uid):
+                    logger.info("APP 弱网已开启，跳过重复设置: uid=%s", uid)
+                    return
+                logger.warning(
+                    "本地缓存显示弱网已开启，但规则不存在，正在重新设置: uid=%s", uid
+                )
+                self._weak_network_enabled_uids.discard(uid)
 
-        self._run_privileged_script(_build_weak_network_script("iptables", uid, enabled))
-        if self._is_ip6tables_available() is False:
-            logger.warning("ip6tables 不可用，仅%s IPv4 弱网规则: uid=%s", action, uid)
+            self._run_privileged_script(
+                _build_weak_network_script("iptables", uid, enabled)
+            )
+            if self._is_ip6tables_available() is False:
+                logger.warning(
+                    "ip6tables 不可用，仅%s IPv4 弱网规则: uid=%s", action, uid
+                )
+                self._update_weak_network_state(uid, enabled)
+                return
+
+            ip6_result = self._run_privileged_script(
+                _build_weak_network_script("ip6tables", uid, enabled), check=False
+            )
+            if ip6_result.returncode != 0:
+                logger.warning(
+                    "ip6tables %s弱网规则失败，已忽略 IPv6: uid=%s stdout=%r stderr=%r",
+                    action,
+                    uid,
+                    _limit_text(ip6_result.stdout),
+                    _limit_text(ip6_result.stderr),
+                )
+
             self._update_weak_network_state(uid, enabled)
             return
 
-        ip6_result = self._run_privileged_script(_build_weak_network_script("ip6tables", uid, enabled), check=False)
+        if enabled and self._global_weak_network_enabled:
+            if self._is_global_weak_network_rule_active():
+                logger.info("全局弱网已开启，跳过重复设置")
+                return
+            logger.warning("本地缓存显示全局弱网已开启，但规则不存在，正在重新设置")
+            self._global_weak_network_enabled = False
+
+        adb_port = self._get_adb_tcp_port()
+        self._run_privileged_script(
+            _build_global_weak_network_script("iptables", enabled, adb_port=adb_port)
+        )
+        if self._is_ip6tables_available() is False:
+            logger.warning("ip6tables 不可用，仅%s IPv4 全局弱网规则", action)
+            self._update_global_weak_network_state(enabled)
+            return
+
+        ip6_result = self._run_privileged_script(
+            _build_global_weak_network_script("ip6tables", enabled, adb_port=adb_port),
+            check=False,
+        )
         if ip6_result.returncode != 0:
             logger.warning(
-                "ip6tables %s弱网规则失败，已忽略 IPv6: uid=%s stdout=%r stderr=%r",
+                "ip6tables %s全局弱网规则失败，已忽略 IPv6 stdout=%r stderr=%r",
                 action,
-                uid,
                 _limit_text(ip6_result.stdout),
                 _limit_text(ip6_result.stderr),
             )
 
-        self._update_weak_network_state(uid, enabled)
+        self._update_global_weak_network_state(enabled)
 
     def _set_reject_network_rule(self, uid: int, *, enabled: bool) -> None:
         """配置 IPv4/IPv6 的按 UID REJECT 断网规则。"""
         action = "开启" if enabled else "关闭"
-        if enabled and uid in self._reject_network_enabled_uids:
-            if self._is_reject_network_rule_active(uid):
-                logger.info("APP REJECT 断网已开启，跳过重复设置: uid=%s", uid)
-                return
-            logger.warning("本地缓存显示 REJECT 断网已开启，但规则不存在，正在重新设置: uid=%s", uid)
-            self._reject_network_enabled_uids.discard(uid)
+        if self._is_iptables_owner_match_available("iptables"):
+            if enabled and uid in self._reject_network_enabled_uids:
+                if self._is_reject_network_rule_active(uid):
+                    logger.info("APP REJECT 断网已开启，跳过重复设置: uid=%s", uid)
+                    return
+                logger.warning(
+                    "本地缓存显示 REJECT 断网已开启，但规则不存在，正在重新设置: uid=%s",
+                    uid,
+                )
+                self._reject_network_enabled_uids.discard(uid)
 
-        self._run_privileged_script(_build_reject_network_script("iptables", uid, enabled))
-        if self._is_ip6tables_available() is False:
-            logger.warning("ip6tables 不可用，仅%s IPv4 REJECT 断网规则: uid=%s", action, uid)
+            self._run_privileged_script(
+                _build_reject_network_script("iptables", uid, enabled)
+            )
+            if self._is_ip6tables_available() is False:
+                logger.warning(
+                    "ip6tables 不可用，仅%s IPv4 REJECT 断网规则: uid=%s", action, uid
+                )
+                self._update_reject_network_state(uid, enabled)
+                return
+
+            ip6_result = self._run_privileged_script(
+                _build_reject_network_script("ip6tables", uid, enabled), check=False
+            )
+            if ip6_result.returncode != 0:
+                logger.warning(
+                    "ip6tables %s REJECT 断网规则失败，已忽略 IPv6: uid=%s stdout=%r stderr=%r",
+                    action,
+                    uid,
+                    _limit_text(ip6_result.stdout),
+                    _limit_text(ip6_result.stderr),
+                )
+
             self._update_reject_network_state(uid, enabled)
             return
 
-        ip6_result = self._run_privileged_script(_build_reject_network_script("ip6tables", uid, enabled), check=False)
+        if enabled and self._global_reject_network_enabled:
+            if self._is_global_reject_network_rule_active():
+                logger.info("全局 REJECT 断网已开启，跳过重复设置")
+                return
+            logger.warning(
+                "本地缓存显示全局 REJECT 断网已开启，但规则不存在，正在重新设置"
+            )
+            self._global_reject_network_enabled = False
+
+        adb_port = self._get_adb_tcp_port()
+        self._run_privileged_script(
+            _build_global_reject_network_script("iptables", enabled, adb_port=adb_port)
+        )
+        if self._is_ip6tables_available() is False:
+            logger.warning("ip6tables 不可用，仅%s IPv4 全局 REJECT 断网规则", action)
+            self._update_global_reject_network_state(enabled, reject=True)
+            return
+
+        ip6_result = self._run_privileged_script(
+            _build_global_reject_network_script(
+                "ip6tables", enabled, adb_port=adb_port
+            ),
+            check=False,
+        )
         if ip6_result.returncode != 0:
             logger.warning(
-                "ip6tables %s REJECT 断网规则失败，已忽略 IPv6: uid=%s stdout=%r stderr=%r",
+                "ip6tables %s全局 REJECT 断网规则失败，已忽略 IPv6 stdout=%r stderr=%r",
                 action,
-                uid,
                 _limit_text(ip6_result.stdout),
                 _limit_text(ip6_result.stderr),
             )
 
-        self._update_reject_network_state(uid, enabled)
+        self._update_global_reject_network_state(enabled, reject=True)
 
     def _is_ip6tables_available(self) -> bool:
         """检查并缓存 ip6tables 是否可用。"""
         if self._ip6tables_available is not None:
             return self._ip6tables_available
 
-        result = self._run_privileged_script("command -v ip6tables >/dev/null", check=False)
+        result = self._run_privileged_script(
+            "command -v ip6tables >/dev/null", check=False
+        )
         self._ip6tables_available = result.returncode == 0
         return self._ip6tables_available
+
+    def _is_iptables_owner_match_available(self, command: str) -> bool:
+        """检查指定 iptables 是否支持 owner 模块。"""
+        if command in self._iptables_owner_match_available:
+            return self._iptables_owner_match_available[command]
+
+        result = self._run_privileged_script(
+            f"{command} -m owner --help >/dev/null", check=False
+        )
+        available = result.returncode == 0
+        self._iptables_owner_match_available[command] = available
+        if not available:
+            logger.warning("%s 不支持 owner 模块，将使用全局弱网模式。", command)
+        return available
 
     def _update_weak_network_state(self, uid: int, enabled: bool) -> None:
         """更新本地弱网状态缓存。"""
@@ -598,7 +775,34 @@ class AdbController:
         result = self._run_privileged_script(script, check=False)
         return result.returncode == 0
 
-    def _run_privileged_script(self, script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def _is_global_weak_network_rule_active(self) -> bool:
+        """确认当前 iptables 中是否存在全局弱网规则。"""
+        script = "iptables -C OUTPUT -j BBMA_WEAKNET_GLOBAL"
+        result = self._run_privileged_script(script, check=False)
+        return result.returncode == 0
+
+    def _is_global_reject_network_rule_active(self) -> bool:
+        """确认当前 iptables 中是否存在全局 REJECT 断网规则。"""
+        script = "iptables -C OUTPUT -j BBMA_REJECTNET_GLOBAL"
+        result = self._run_privileged_script(script, check=False)
+        return result.returncode == 0
+
+    def _update_global_weak_network_state(self, enabled: bool) -> None:
+        """更新本地全局弱网状态缓存。"""
+        self._global_weak_network_enabled = enabled
+
+    def _update_global_reject_network_state(
+        self, enabled: bool, reject: bool = False
+    ) -> None:
+        """更新本地全局 REJECT 断网状态缓存。"""
+        if reject:
+            self._global_reject_network_enabled = enabled
+        else:
+            self._global_weak_network_enabled = enabled
+
+    def _run_privileged_script(
+        self, script: str, *, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         """使用 root adb shell 执行特权脚本。"""
         self.ensure_root_shell()
         return self._run(["shell", "sh", "-c", _quote_shell_arg(script)], check=check)
@@ -633,11 +837,77 @@ def _build_weak_network_script(command: str, uid: int, enabled: bool) -> str:
     )
 
 
+def _build_global_weak_network_script(
+    command: str, enabled: bool, adb_port: int | None = None
+) -> str:
+    """生成不依赖 UID 的全局弱网 iptables 脚本。"""
+    chain = "BBMA_WEAKNET_GLOBAL"
+    if enabled:
+        allow_adb = ""
+        if adb_port is not None:
+            allow_adb = (
+                f"{command} -A {chain} -p tcp --sport {adb_port} -j ACCEPT; "
+                f"{command} -A {chain} -p tcp --dport {adb_port} -j ACCEPT; "
+            )
+        return (
+            f"{command} -N {chain} 2>/dev/null || true; "
+            f"{command} -F {chain}; "
+            f"{command} -A {chain} -o lo -j ACCEPT; "
+            f"{allow_adb}"
+            f"{command} -A {chain} -j DROP; "
+            f"{command} -C OUTPUT -j {chain} 2>/dev/null || {command} -I OUTPUT -j {chain}"
+        )
+    return (
+        f"while {command} -C OUTPUT -j {chain} 2>/dev/null; "
+        f"do {command} -D OUTPUT -j {chain}; done; "
+        f"{command} -F {chain} 2>/dev/null || true; "
+        f"{command} -X {chain} 2>/dev/null || true"
+    )
+
+
+def _build_global_reject_network_script(
+    command: str, enabled: bool, adb_port: int | None = None
+) -> str:
+    """生成不依赖 UID 的全局 REJECT 断网 iptables 脚本。"""
+    chain = "BBMA_REJECTNET_GLOBAL"
+    if enabled:
+        allow_adb = ""
+        if adb_port is not None:
+            allow_adb = (
+                f"{command} -A {chain} -p tcp --sport {adb_port} -j ACCEPT; "
+                f"{command} -A {chain} -p tcp --dport {adb_port} -j ACCEPT; "
+            )
+        reject_with = (
+            "icmp6-port-unreachable"
+            if command == "ip6tables"
+            else "icmp-port-unreachable"
+        )
+        return (
+            f"{command} -N {chain} 2>/dev/null || true; "
+            f"{command} -F {chain}; "
+            f"{command} -A {chain} -o lo -j ACCEPT; "
+            f"{allow_adb}"
+            f"{command} -A {chain} -p tcp -j REJECT --reject-with tcp-reset; "
+            f"{command} -A {chain} -j REJECT --reject-with {reject_with}; "
+            f"{command} -C OUTPUT -j {chain} 2>/dev/null || {command} -I OUTPUT -j {chain}"
+        )
+    return (
+        f"while {command} -C OUTPUT -j {chain} 2>/dev/null; "
+        f"do {command} -D OUTPUT -j {chain}; done; "
+        f"{command} -F {chain} 2>/dev/null || true; "
+        f"{command} -X {chain} 2>/dev/null || true"
+    )
+
+
 def _build_reject_network_script(command: str, uid: int, enabled: bool) -> str:
     """生成按 UID 控制 REJECT 断网的 iptables 脚本。"""
     chain = "BBMA_REJECTNET"
     if enabled:
-        reject_with = "icmp6-port-unreachable" if command == "ip6tables" else "icmp-port-unreachable"
+        reject_with = (
+            "icmp6-port-unreachable"
+            if command == "ip6tables"
+            else "icmp-port-unreachable"
+        )
         return (
             f"{command} -N {chain} 2>/dev/null || true; "
             f"{command} -F {chain}; "
@@ -663,6 +933,38 @@ def _build_weak_network_diagnostics_script(uid: int) -> str:
         f"if command -v ip6tables >/dev/null 2>&1; then "
         f"echo ipv6_rule=$([ $(ip6tables -C OUTPUT -m owner --uid-owner {uid} -j {chain} "
         f"2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "
+        f"else echo ipv6_rule=unavailable; fi; "
+        f"echo '[iptables OUTPUT]'; iptables -L OUTPUT -v -n 2>&1; "
+        f"echo '[iptables {chain}]'; iptables -L {chain} -v -n 2>&1; "
+        f"if command -v ip6tables >/dev/null 2>&1; then "
+        f"echo '[ip6tables OUTPUT]'; ip6tables -L OUTPUT -v -n 2>&1; "
+        f"echo '[ip6tables {chain}]'; ip6tables -L {chain} -v -n 2>&1; fi"
+    )
+
+
+def _build_global_weak_network_diagnostics_script() -> str:
+    """生成全局弱网状态诊断脚本，只读取规则和计数器。"""
+    chain = "BBMA_WEAKNET_GLOBAL"
+    return (
+        f"echo ipv4_rule=$([ $(iptables -C OUTPUT -j {chain} 2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "
+        f"if command -v ip6tables >/dev/null 2>&1; then "
+        f"echo ipv6_rule=$([ $(ip6tables -C OUTPUT -j {chain} 2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "
+        f"else echo ipv6_rule=unavailable; fi; "
+        f"echo '[iptables OUTPUT]'; iptables -L OUTPUT -v -n 2>&1; "
+        f"echo '[iptables {chain}]'; iptables -L {chain} -v -n 2>&1; "
+        f"if command -v ip6tables >/dev/null 2>&1; then "
+        f"echo '[ip6tables OUTPUT]'; ip6tables -L OUTPUT -v -n 2>&1; "
+        f"echo '[ip6tables {chain}]'; ip6tables -L {chain} -v -n 2>&1; fi"
+    )
+
+
+def _build_global_reject_network_diagnostics_script() -> str:
+    """生成全局 REJECT 断网状态诊断脚本，只读取规则和计数器。"""
+    chain = "BBMA_REJECTNET_GLOBAL"
+    return (
+        f"echo ipv4_rule=$([ $(iptables -C OUTPUT -j {chain} 2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "
+        f"if command -v ip6tables >/dev/null 2>&1; then "
+        f"echo ipv6_rule=$([ $(ip6tables -C OUTPUT -j {chain} 2>/dev/null; echo $?) -eq 0 ] && echo 1 || echo 0); "
         f"else echo ipv6_rule=unavailable; fi; "
         f"echo '[iptables OUTPUT]'; iptables -L OUTPUT -v -n 2>&1; "
         f"echo '[iptables {chain}]'; iptables -L {chain} -v -n 2>&1; "
@@ -725,7 +1027,9 @@ def _validate_duration(duration_ms: int) -> int:
     return int_value
 
 
-def _calculate_swipe_end(start_x: int, start_y: int, direction: str, distance: int) -> tuple[int, int]:
+def _calculate_swipe_end(
+    start_x: int, start_y: int, direction: str, distance: int
+) -> tuple[int, int]:
     """根据方向和距离计算滑动终点。"""
     if direction == "up":
         return start_x, start_y - distance
@@ -744,7 +1048,15 @@ def _calculate_pinch_inner_offset() -> int:
 def _parse_touch_device_info(output: str) -> tuple[str, int, int, int, int] | None:
     """从 getevent 输出中解析多点触控设备和坐标范围。"""
     for block in _split_getevent_device_blocks(output):
-        if not all(name in block for name in ("ABS_MT_SLOT", "ABS_MT_TRACKING_ID", "ABS_MT_POSITION_X", "ABS_MT_POSITION_Y")):
+        if not all(
+            name in block
+            for name in (
+                "ABS_MT_SLOT",
+                "ABS_MT_TRACKING_ID",
+                "ABS_MT_POSITION_X",
+                "ABS_MT_POSITION_Y",
+            )
+        ):
             continue
 
         device_match = re.search(r"add device \d+:\s+(\S+)", block)
@@ -805,8 +1117,12 @@ def _build_two_finger_sendevent_script(
     sleep_seconds = max(duration_ms / steps / 1000, 0.01)
     commands = []
 
-    first_touch_start = _screen_to_touch_point(first_start, screen_width, screen_height, min_x, max_x, min_y, max_y)
-    second_touch_start = _screen_to_touch_point(second_start, screen_width, screen_height, min_x, max_x, min_y, max_y)
+    first_touch_start = _screen_to_touch_point(
+        first_start, screen_width, screen_height, min_x, max_x, min_y, max_y
+    )
+    second_touch_start = _screen_to_touch_point(
+        second_start, screen_width, screen_height, min_x, max_x, min_y, max_y
+    )
     _append_release_touch_slots(commands, device)
     commands.append("sleep 0.050")
 
@@ -818,8 +1134,12 @@ def _build_two_finger_sendevent_script(
     for step in range(1, steps + 1):
         first_point = _interpolate_point(first_start, first_end, step, steps)
         second_point = _interpolate_point(second_start, second_end, step, steps)
-        first_touch_point = _screen_to_touch_point(first_point, screen_width, screen_height, min_x, max_x, min_y, max_y)
-        second_touch_point = _screen_to_touch_point(second_point, screen_width, screen_height, min_x, max_x, min_y, max_y)
+        first_touch_point = _screen_to_touch_point(
+            first_point, screen_width, screen_height, min_x, max_x, min_y, max_y
+        )
+        second_touch_point = _screen_to_touch_point(
+            second_point, screen_width, screen_height, min_x, max_x, min_y, max_y
+        )
         _append_touch_move(commands, device, 0, first_touch_point)
         _append_touch_move(commands, device, 1, second_touch_point)
         _append_syn(commands, device)
@@ -854,7 +1174,9 @@ def _scale_axis(value: int, screen_size: int, touch_min: int, touch_max: int) ->
     return int(round(touch_min + ratio * (touch_max - touch_min)))
 
 
-def _interpolate_point(start: tuple[int, int], end: tuple[int, int], step: int, steps: int) -> tuple[int, int]:
+def _interpolate_point(
+    start: tuple[int, int], end: tuple[int, int], step: int, steps: int
+) -> tuple[int, int]:
     """按进度计算滑动路径中的坐标。"""
     start_x, start_y = start
     end_x, end_y = end
@@ -864,7 +1186,13 @@ def _interpolate_point(start: tuple[int, int], end: tuple[int, int], step: int, 
     )
 
 
-def _append_touch_down(commands: list[str], device: str, slot: int, tracking_id: int, point: tuple[int, int]) -> None:
+def _append_touch_down(
+    commands: list[str],
+    device: str,
+    slot: int,
+    tracking_id: int,
+    point: tuple[int, int],
+) -> None:
     """追加单根手指按下事件。"""
     x, y = point
     _append_sendevent(commands, device, 3, 47, slot)
@@ -874,7 +1202,9 @@ def _append_touch_down(commands: list[str], device: str, slot: int, tracking_id:
     _append_sendevent(commands, device, 3, 58, 1)
 
 
-def _append_touch_move(commands: list[str], device: str, slot: int, point: tuple[int, int]) -> None:
+def _append_touch_move(
+    commands: list[str], device: str, slot: int, point: tuple[int, int]
+) -> None:
     """追加单根手指移动事件。"""
     x, y = point
     _append_sendevent(commands, device, 3, 47, slot)
@@ -901,7 +1231,9 @@ def _append_syn(commands: list[str], device: str) -> None:
     _append_sendevent(commands, device, 0, 0, 0)
 
 
-def _append_sendevent(commands: list[str], device: str, event_type: int, event_code: int, value: int) -> None:
+def _append_sendevent(
+    commands: list[str], device: str, event_type: int, event_code: int, value: int
+) -> None:
     """追加一条 sendevent 命令。"""
     commands.append(f"sendevent {device} {event_type} {event_code} {value}")
 
@@ -920,7 +1252,7 @@ def _escape_input_text(text: str) -> str:
     return "".join(escaped_chars)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     adb = AdbController()
     adb.adb_restart()
     print(adb.get_screen_size())

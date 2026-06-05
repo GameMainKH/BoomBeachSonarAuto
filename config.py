@@ -8,7 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent
 ADB_SERIAL = "127.0.0.1:5555"
 
 # 默认控制的游戏包名
-GAME_PACKAGE_NAME = "com.tencent.tmgp.supercell.boombeach"
+GAME_PACKAGE_NAME = "com.supercell.boombeach"
 
 # 模板图片目录和截图保存目录
 TEMPLATE_DIR = BASE_DIR / "template"
@@ -26,15 +26,15 @@ DEFAULT_SUBMARINES: Final[tuple[int, ...]] = (2, 2, 3, 4, 5)
 
 # 固定关卡对应的潜艇长度列表，供前 10 个关卡使用
 SPECIAL_SUBMARINES: Final[dict[int, tuple[int, ...]]] = {
-    1:  (3,),
-    2:  (2, 2),
-    3:  (2, 2, 3),
-    4:  (2, 3, 4),
-    5:  (2, 3, 3, 4),
-    6:  (2, 2, 3, 3, 5),
-    7:  (2, 2, 3, 3, 4, 5),
-    8:  (2, 2, 3, 3, 4, 4, 5),
-    9:  (2, 3, 3, 4, 4, 5),
+    1: (3,),
+    2: (2, 2),
+    3: (2, 2, 3),
+    4: (2, 3, 4),
+    5: (2, 3, 3, 4),
+    6: (2, 2, 3, 3, 5),
+    7: (2, 2, 3, 3, 4, 5),
+    8: (2, 2, 3, 3, 4, 4, 5),
+    9: (2, 3, 3, 4, 4, 5),
     10: (2, 2, 3, 4, 4, 5),
 }
 
@@ -48,28 +48,24 @@ LEVEL_GRID_SIZES: Final[dict[int, int]] = {
     6: 8,
     7: 9,
     8: 10,
-    9: 10,   
+    9: 10,
     10: 10,
-    **{
-        level: 10
-        for level in range(11, MAX_LEVEL + 1)
-    },
-
+    **{level: 10 for level in range(11, MAX_LEVEL + 1)},
 }
 
 # Level 对应的潜艇长度列表
 SUBMARINES: Final[dict[int, tuple[int, ...]]] = {
     **SPECIAL_SUBMARINES,
-    **{
-        level: DEFAULT_SUBMARINES
-        for level in range(11, MAX_LEVEL + 1)
-    },
+    **{level: DEFAULT_SUBMARINES for level in range(11, MAX_LEVEL + 1)},
 }
 
 
 # 是否优先使用人工校准后的固定点位
 USE_SAVED_POINTS = True
 SAVED_POINTS_FILE = BASE_DIR / "save_points" / "points.json"
+
+# 是否为国际版游戏（国际版不需要点击登录）
+IS_INTERNATIONAL_VERSION = True
 
 # 默认的截图文件名和模板匹配的默认阈值
 DEFAULT_SCREENSHOT_NAME = "screen.png"
