@@ -22,11 +22,7 @@ from utils.submarine_strategy import Cell, SubmarineStrategy, get_configured_sub
 logger = get_logger(__name__)
 adb = AdbController()
 _weak_network_cleanup_done = False
-ENABLE_WEAK_NETWORK_DIAGNOSTICS = True
     
-    
-def enter_account(img_path: str): # 暂未实现
-    pass
 
 def enable_weak_network(second: float = 0) -> None:
     """开启游戏弱网，并按需等待网络状态生效。"""
@@ -74,27 +70,57 @@ def register_exit_cleanup() -> None:
         if signum is not None:
             signal.signal(signum, handle_exit_signal)
 
-def enter_activity(re_enter: bool = False) -> None:
-    adb.delay(0.5)
-    res = wait_until_occur("./template/activity_button.png", timeout=20)
-    if res is None:
-        logger.error("未找到活动按钮，无法进入活动界面，重试中...")
-        adb.close_app(GAME_PACKAGE_NAME)
-        adb.delay(1.5).open_app(GAME_PACKAGE_NAME)
-        login_img = wait_until_occur("./template/login.png", timeout=30)
-        adb.click(*login_img.center) # 点击登录按钮
-        return enter_activity()
+def enter_activity(re_enter: bool = False, max_retries: int = 5) -> None:
+    if max_retries <= 0:
+        raise ValueError(f"max_retries 必须大于 0: {max_retries}")
 
-    adb.click(*res.center) # 点击活动按钮进入活动界面
-    if not re_enter:
-        enable_weak_network(0.2)
-        adb.delay(0.4).swipe(1000, 660, 1000, 180) # 上滑展示全部选项（仅第一次进入需要）
-        adb.delay(0.2).swipe(1000, 660, 1000, 180) 
-    
-    adb.delay(0.7).click(1205, 644) # 点击进入活动详情界面
-    if wait_until_occur("./template/quit_activity.png", timeout=15) is None:
-        logger.warning("进入活动详情界面失败，重新尝试进入活动")
-        return enter_activity()
+    last_failure = "进入活动失败"
+    for attempt in range(1, max_retries + 1):
+        adb.delay(0.5)
+        res = wait_until_occur("./template/activity_button.png", timeout=20)
+        if res is None:
+            last_failure = "未找到活动按钮"
+            logger.warning(
+                "%s，无法进入活动界面，正在重试 (%s/%s)",
+                last_failure,
+                attempt,
+                max_retries,
+            )
+            _restart_game_for_activity_retry()
+            continue
+
+        adb.click(*res.center) # 点击活动按钮进入活动界面
+        if not re_enter:
+            enable_weak_network(0.2)
+            adb.delay(0.4).swipe(1000, 660, 1000, 180) # 上滑展示全部选项（仅第一次进入需要）
+            adb.delay(0.2).swipe(1000, 660, 1000, 180)
+
+        adb.delay(0.7).click(1205, 644) # 点击进入活动详情界面
+        if wait_until_occur("./template/quit_activity.png", timeout=15) is not None:
+            return
+
+        last_failure = "进入活动详情界面失败"
+        logger.warning(
+            "%s，正在重试进入活动 (%s/%s)",
+            last_failure,
+            attempt,
+            max_retries,
+        )
+        _restart_game_for_activity_retry()
+
+    message = f"{last_failure}，已达到最大重试次数 {max_retries}"
+    logger.error(message)
+    raise RuntimeError(message)
+
+
+def _restart_game_for_activity_retry() -> None:
+    adb.close_app(GAME_PACKAGE_NAME)
+    adb.delay(1.5).open_app(GAME_PACKAGE_NAME)
+    login_img = wait_until_occur("./template/login.png", timeout=30)
+    if login_img is None:
+        logger.warning("重新启动游戏后未找到登录按钮，继续下一次进入尝试")
+        return
+    adb.click(*login_img.center) # 点击登录按钮
     
 
 def _build_cell_polygons(quad: np.ndarray, n: int) -> list[list[np.ndarray]]:
@@ -213,7 +239,6 @@ def handle_game_level(level: int, hit_map: list[list[int]]) -> tuple[np.ndarray,
     if submarines is None:
         message = f"第 {level} 关缺少潜艇长度配置，回退逐格扫描"
         logger.warning(message)
-        print(message)
         _scan_level_by_grid_order(level, hit_map, click_points)
     else:
         _scan_level_by_strategy(level, hit_map, click_points, submarines)
@@ -321,10 +346,6 @@ def _probe_cell(
 def restart_process():
     disable_weak_network()
     enter_activity()
-    
-def is_hit():
-    img = adb.read_screenshot()
-    return find_template(img, "./template/hit.png", threshold=0.9) is not None  
         
 def wait_until_occur(template_path: str, timeout: float = 30.0) -> MatchResult | None:
     """等待直到指定模板出现，返回匹配结果或 None（超时）。"""
@@ -362,8 +383,8 @@ def main(level: int):
     base_img, quad = handle_game_level(level, hit_map)
     out_path = OUTPUT_DIR / f"hit_map_level_{level}.png"
     save_hit_map_image(base_img, quad, hit_map, out_path)
-    print(hit_map)
-    print(f"命中可视化图片已保存：{out_path}")
+    logger.info("命中矩阵：%s", hit_map)
+    logger.info("命中可视化图片已保存：%s", out_path)
     
 
 if __name__ == "__main__":
