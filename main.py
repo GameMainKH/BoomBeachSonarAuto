@@ -90,7 +90,7 @@ def enter_activity(re_enter: bool = False, max_retries: int = 5) -> None:
             continue
 
         adb.click(*res.center) # 点击活动按钮进入活动界面
-        if not re_enter:
+        if not re_enter or attempt > 1:
             enable_weak_network(0.2)
             adb.delay(0.4).swipe(1000, 660, 1000, 180) # 上滑展示全部选项（仅第一次进入需要）
             adb.delay(0.2).swipe(1000, 660, 1000, 180)
@@ -115,6 +115,8 @@ def enter_activity(re_enter: bool = False, max_retries: int = 5) -> None:
 
 def _restart_game_for_activity_retry() -> None:
     adb.close_app(GAME_PACKAGE_NAME)
+    adb.disable_reject_network(GAME_PACKAGE_NAME)
+    disable_weak_network()
     adb.delay(1.5).open_app(GAME_PACKAGE_NAME)
     login_img = wait_until_occur("./template/login.png", timeout=30)
     if login_img is None:

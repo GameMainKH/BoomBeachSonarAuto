@@ -12,3 +12,5 @@ _screen.png
 .venv/
 venv/
 .env
+.vscode
+.pytest_cache

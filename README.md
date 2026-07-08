@@ -281,6 +281,9 @@ python _debug/weak_network_gui.py
 | `template/quit_activity.png` | 活动详情页退出按钮 |
 | `template/ship.png` | 母舰图标 |
 | `template/retry.png` | 断网重试图标 |
+| `template/ship.png` | 战斗母舰图标(暂未使用) |
+| `template/sonar_pic_alive.png` | 声呐活动界面图标(暂未使用) |
+| `template/win.png` | 声呐海域通过图标(暂未使用) |
 
 `template/qnet_button_off.png`，为旧版 QNET 流程参考；当前主流程不再依赖该模板。
 
