@@ -56,6 +56,8 @@
 │   ├── image_match.py         # 模板匹配
 │   ├── diamond_centers.py     # 菱形网格检测与中心点计算
 │   ├── diamond_hit.py         # 点击前后截图对比与命中判断
+│   ├── hit_map.py             # 命中矩阵投影与可视化图片输出
+│   ├── probe_protocol.py      # 单次弱网探测状态机与安全转换
 │   ├── submarine_strategy.py  # 潜艇搜索策略、确认和安全区推断
 │   └── logger.py              # 日志配置
 ├── tests/                     # 策略和主流程单元测试

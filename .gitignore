@@ -1,6 +1,9 @@
 __pycache__/
 *.py[cod]
 .venv/
+AGENTS.md
+COLLABORATION.md
+.mypy_cache
 outputs/*.png
 _debug/screenshots/*.png
 _debug/screenshots/run_debug/*.png
