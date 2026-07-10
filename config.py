@@ -19,7 +19,7 @@ OUTPUT_DIR = BASE_DIR / "outputs"
 
 
 # 目前支持的最大关卡
-MAX_LEVEL: Final[int] = 36
+MAX_LEVEL: Final[int] = 50
 
 # 第 10 海域及以上关卡使用的默认潜艇长度列表
 DEFAULT_SUBMARINES: Final[tuple[int, ...]] = (2, 2, 3, 4, 5)
