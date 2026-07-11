@@ -1,3 +1,4 @@
 opencv-python>=4.8
 PyQt6>=6.6
 numpy
+tqdm>=4.67

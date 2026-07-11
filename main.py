@@ -18,7 +18,12 @@ from save_points.points import read_saved_points, read_saved_quad
 from utils import AdbController, MatchResult, find_template, get_logger, is_diamond_hit
 from utils.diamond_centers import detect_diamond_centers
 from utils.hit_map import save_hit_map_image
-from utils.progress import SearchProgress, format_elapsed
+from utils.progress import (
+    SearchProgress,
+    fixed_progress_bar,
+    format_elapsed,
+    update_fixed_progress,
+)
 from utils.probe_protocol import (
     ProbeNotReadyError,
     ProbePhase,
@@ -276,16 +281,31 @@ def _scan_level_by_grid_order(
         max_probes=len(targets),
         started_at=run_started_at if run_started_at is not None else monotonic(),
     )
-    logger.info(progress.grid_message(completed=0, total=len(targets), now=monotonic()))
-    for completed, (index, point, cell) in enumerate(targets, start=1):
-        _probe_cell(level, hit_map, cell, point, index)
-        logger.info(
-            progress.grid_message(
-                completed=completed,
+    with fixed_progress_bar(
+        total=len(targets),
+        description=f"第 {level} 关逐格扫描",
+        unit="格",
+    ) as bar:
+        update_fixed_progress(
+            bar,
+            0,
+            progress.grid_postfix(
+                completed=0,
                 total=len(targets),
                 now=monotonic(),
-            )
+            ),
         )
+        for completed, (index, point, cell) in enumerate(targets, start=1):
+            _probe_cell(level, hit_map, cell, point, index)
+            update_fixed_progress(
+                bar,
+                current=completed,
+                postfix=progress.grid_postfix(
+                    completed=completed,
+                    total=len(targets),
+                    now=monotonic(),
+                ),
+            )
 
 
 def _scan_level_by_strategy(
@@ -308,46 +328,63 @@ def _scan_level_by_strategy(
         started_at=run_started_at if run_started_at is not None else monotonic(),
     )
 
-    logger.info(
-        "第 %s 关启用潜艇策略：grid=%s submarines=%s", level, grid_size, submarines
-    )
-    logger.info(
-        progress.strategy_message(
-            attempts=0,
-            hit_cells=0,
-            confirmed_lengths=[],
-            remaining_lengths=list(submarines),
-            now=monotonic(),
-        )
-    )
-
-    while not strategy.done and attempts < max_attempts:
-        cell = strategy.choose_next_cell()
-        if cell is None:
-            logger.warning("第 %s 关策略已无可选方格，提前结束", level)
-            break
-
-        row, col = cell
-        index = row * grid_size + col
-        hit = _probe_cell(level, hit_map, cell, click_points[index], index)
-        attempts += 1
-        strategy.report_result(cell, hit)
-        confirmed_lengths = [ship.length for ship in strategy.get_confirmed_ships()]
-        hit_cells = sum(1 for shot_hit in strategy.shots.values() if shot_hit)
+    with fixed_progress_bar(
+        total=sum(submarines),
+        description=f"第 {level} 关探索",
+        unit="格",
+    ) as bar:
         logger.info(
-            progress.strategy_message(
-                attempts=attempts,
-                hit_cells=hit_cells,
-                confirmed_lengths=confirmed_lengths,
-                remaining_lengths=list(strategy.remaining.elements()),
+            "第 %s 关启用潜艇策略：grid=%s submarines=%s",
+            level,
+            grid_size,
+            submarines,
+        )
+        update_fixed_progress(
+            bar,
+            0,
+            progress.strategy_postfix(
+                attempts=0,
+                confirmed_lengths=[],
+                remaining_lengths=list(submarines),
                 now=monotonic(),
-            )
+            ),
         )
 
-    if strategy.done:
-        logger.info("第 %s 关策略已确认全部潜艇，探测次数：%s", level, attempts)
-    else:
-        logger.warning("第 %s 关策略未能确认全部潜艇，回退逐格扫描未探测方格", level)
+        while not strategy.done and attempts < max_attempts:
+            cell = strategy.choose_next_cell()
+            if cell is None:
+                logger.warning("第 %s 关策略已无可选方格，提前结束", level)
+                break
+
+            row, col = cell
+            index = row * grid_size + col
+            hit = _probe_cell(level, hit_map, cell, click_points[index], index)
+            attempts += 1
+            strategy.report_result(cell, hit)
+            confirmed_lengths = [
+                ship.length for ship in strategy.get_confirmed_ships()
+            ]
+            hit_cells = sum(1 for shot_hit in strategy.shots.values() if shot_hit)
+            update_fixed_progress(
+                bar,
+                hit_cells,
+                progress.strategy_postfix(
+                    attempts=attempts,
+                    confirmed_lengths=confirmed_lengths,
+                    remaining_lengths=list(strategy.remaining.elements()),
+                    now=monotonic(),
+                ),
+            )
+
+        if strategy.done:
+            logger.info("第 %s 关策略已确认全部潜艇，探测次数：%s", level, attempts)
+        else:
+            logger.warning(
+                "第 %s 关策略未能确认全部潜艇，回退逐格扫描未探测方格",
+                level,
+            )
+
+    if not strategy.done:
         known_cells = set(strategy.shots) | strategy.blocked_cells
         _scan_level_by_grid_order(
             level,
