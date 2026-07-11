@@ -20,3 +20,9 @@ venv/
 .env
 .vscode
 .pytest_cache
+.agents
+.codex
+.mypy_cache
+
+AGENTS.md
+COLLABORATION.md
