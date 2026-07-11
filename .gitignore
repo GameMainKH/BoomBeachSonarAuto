@@ -5,6 +5,7 @@ __pycache__/
 outputs/*.png
 _debug/screenshots/*.png
 _debug/screenshots/run_debug/*.png
+_debug/screenshots/fullyauto/
 _debug/logs/*.log
 
 AGENTS.md

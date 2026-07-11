@@ -18,6 +18,7 @@ from save_points.points import read_saved_points, read_saved_quad
 from utils import AdbController, MatchResult, find_template, get_logger, is_diamond_hit
 from utils.diamond_centers import detect_diamond_centers
 from utils.hit_map import save_hit_map_image
+from utils.progress import SearchProgress, format_elapsed
 from utils.probe_protocol import (
     ProbeNotReadyError,
     ProbePhase,
@@ -220,7 +221,9 @@ def get_click_points(
 
 
 def handle_game_level(
-    level: int, hit_map: list[list[int]]
+    level: int,
+    hit_map: list[list[int]],
+    run_started_at: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """处理单个关卡：有潜艇配置时策略选点，缺少配置时回退逐格扫描。"""
     adb.delay(1.5)
@@ -231,9 +234,20 @@ def handle_game_level(
     if submarines is None:
         message = f"第 {level} 关缺少潜艇长度配置，回退逐格扫描"
         logger.warning(message)
-        _scan_level_by_grid_order(level, hit_map, click_points)
+        _scan_level_by_grid_order(
+            level,
+            hit_map,
+            click_points,
+            run_started_at=run_started_at,
+        )
     else:
-        _scan_level_by_strategy(level, hit_map, click_points, submarines)
+        _scan_level_by_strategy(
+            level,
+            hit_map,
+            click_points,
+            submarines,
+            run_started_at=run_started_at,
+        )
 
     return grid_img, grid_quad
 
@@ -243,15 +257,35 @@ def _scan_level_by_grid_order(
     hit_map: list[list[int]],
     click_points: list[tuple[int, int]],
     skip_cells: set[Cell] | None = None,
+    run_started_at: float | None = None,
 ) -> None:
     """按行优先顺序逐格探测，可跳过策略阶段已获得真实反馈的格子。"""
     grid_size = get_level_grid_size(level)
     skip_cells = skip_cells or set()
-    for index, point in enumerate(click_points):
-        cell = (index // grid_size, index % grid_size)
-        if cell in skip_cells:
-            continue
+    targets = [
+        (index, point, (index // grid_size, index % grid_size))
+        for index, point in enumerate(click_points)
+        if (index // grid_size, index % grid_size) not in skip_cells
+    ]
+    if not targets:
+        logger.info("第 %s 关逐格扫描没有剩余目标", level)
+        return
+
+    progress = SearchProgress(
+        level=level,
+        max_probes=len(targets),
+        started_at=run_started_at if run_started_at is not None else monotonic(),
+    )
+    logger.info(progress.grid_message(completed=0, total=len(targets), now=monotonic()))
+    for completed, (index, point, cell) in enumerate(targets, start=1):
         _probe_cell(level, hit_map, cell, point, index)
+        logger.info(
+            progress.grid_message(
+                completed=completed,
+                total=len(targets),
+                now=monotonic(),
+            )
+        )
 
 
 def _scan_level_by_strategy(
@@ -259,15 +293,32 @@ def _scan_level_by_strategy(
     hit_map: list[list[int]],
     click_points: list[tuple[int, int]],
     submarines: list[int],
+    run_started_at: float | None = None,
 ) -> None:
     """使用潜艇策略选择探测格；策略无法完成时回退扫描剩余未探测格。"""
     grid_size = get_level_grid_size(level)
     strategy = SubmarineStrategy(grid_size, submarines)
     max_attempts = grid_size * grid_size
     attempts = 0
+    progress = SearchProgress(
+        level=level,
+        max_probes=max_attempts,
+        total_ship_cells=sum(submarines),
+        total_ships=len(submarines),
+        started_at=run_started_at if run_started_at is not None else monotonic(),
+    )
 
     logger.info(
         "第 %s 关启用潜艇策略：grid=%s submarines=%s", level, grid_size, submarines
+    )
+    logger.info(
+        progress.strategy_message(
+            attempts=0,
+            hit_cells=0,
+            confirmed_lengths=[],
+            remaining_lengths=list(submarines),
+            now=monotonic(),
+        )
     )
 
     while not strategy.done and attempts < max_attempts:
@@ -281,6 +332,17 @@ def _scan_level_by_strategy(
         hit = _probe_cell(level, hit_map, cell, click_points[index], index)
         attempts += 1
         strategy.report_result(cell, hit)
+        confirmed_lengths = [ship.length for ship in strategy.get_confirmed_ships()]
+        hit_cells = sum(1 for shot_hit in strategy.shots.values() if shot_hit)
+        logger.info(
+            progress.strategy_message(
+                attempts=attempts,
+                hit_cells=hit_cells,
+                confirmed_lengths=confirmed_lengths,
+                remaining_lengths=list(strategy.remaining.elements()),
+                now=monotonic(),
+            )
+        )
 
     if strategy.done:
         logger.info("第 %s 关策略已确认全部潜艇，探测次数：%s", level, attempts)
@@ -292,6 +354,7 @@ def _scan_level_by_strategy(
             hit_map,
             click_points,
             skip_cells=known_cells,
+            run_started_at=run_started_at,
         )
 
 
@@ -453,21 +516,29 @@ def click_template(
 
 def main(level: int) -> Path | None:
     """执行指定关卡的逻辑探测并输出命中图。"""
+    run_started_at = monotonic()
     grid_size = get_level_grid_size(level)
     hit_map = [[0] * grid_size for _ in range(grid_size)]
-    disable_weak_network()
+    try:
+        disable_weak_network()
 
-    if find_template(adb.read_screenshot(), ACTIVITY_BUTTON_TEMPLATE) is None:
-        logger.error("当前不在海岛主界面，无法启动脚本")
-        return None
+        if find_template(adb.read_screenshot(), ACTIVITY_BUTTON_TEMPLATE) is None:
+            logger.error("当前不在海岛主界面，无法启动脚本")
+            return None
 
-    enter_activity()
-    base_img, quad = handle_game_level(level, hit_map)
-    out_path = OUTPUT_DIR / f"hit_map_level_{level}.png"
-    save_hit_map_image(base_img, quad, hit_map, out_path)
-    logger.info("命中矩阵：%s", hit_map)
-    logger.info("命中可视化图片已保存：%s", out_path)
-    return out_path
+        enter_activity()
+        base_img, quad = handle_game_level(
+            level,
+            hit_map,
+            run_started_at=run_started_at,
+        )
+        out_path = OUTPUT_DIR / f"hit_map_level_{level}.png"
+        save_hit_map_image(base_img, quad, hit_map, out_path)
+        logger.info("命中矩阵：%s", hit_map)
+        logger.info("命中可视化图片已保存：%s", out_path)
+        return out_path
+    finally:
+        logger.info("脚本总运行时间：%s", format_elapsed(monotonic() - run_started_at))
 
 
 if __name__ == "__main__":
