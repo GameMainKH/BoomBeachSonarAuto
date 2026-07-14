@@ -48,6 +48,10 @@ _weak_network_cleanup_done = False
 _active_probe: "ProbeTransaction | None" = None
 
 
+class ManualNetworkRecoveryError(RuntimeError):
+    """人工核验后仍无法完整清除断网规则。"""
+
+
 def _has_pending_probe_request() -> bool:
     return _active_probe is not None and _active_probe.request_may_be_pending
 
@@ -519,6 +523,74 @@ def restart_process() -> None:
     enter_activity()
 
 
+def restore_network_after_manual_verification() -> bool:
+    """信任用户的现场核验，只清除断网规则，不点击或启动游戏。
+
+    返回调用前是否检测到 DROP。该函数不得从正常探测异常处理里自动调用，
+    因为关闭 DROP 可能补发客户端仍保存的请求。
+    """
+    global _active_probe, _weak_network_cleanup_done
+
+    adb.ensure_root_shell()
+    handled_drop = adb.is_weak_network_enabled(GAME_PACKAGE_NAME)
+
+    adb.disable_reject_network(GAME_PACKAGE_NAME)
+    if adb.is_reject_network_enabled(GAME_PACKAGE_NAME):
+        raise ManualNetworkRecoveryError("REJECT 规则仍然残留，网络恢复未完成")
+
+    adb.disable_weak_network(GAME_PACKAGE_NAME)
+    if adb.is_weak_network_enabled(GAME_PACKAGE_NAME):
+        raise ManualNetworkRecoveryError("DROP 规则仍然残留，网络恢复未完成")
+
+    _active_probe = None
+    _weak_network_cleanup_done = True
+    logger.info("人工核验后的网络恢复完成；未点击或启动游戏")
+    return handled_drop
+
+
+def _show_manual_network_recovery_dialog() -> bool:
+    """使用 Windows 原生对话框询问人工判断，默认选择否。"""
+    try:
+        import ctypes
+
+        message_box = ctypes.windll.user32.MessageBoxW
+    except (AttributeError, ImportError):
+        logger.error("当前系统无法显示人工恢复对话框；继续保留 DROP/REJECT")
+        return False
+
+    # MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SYSTEMMODAL
+    result = message_box(
+        None,
+        "探测异常中断，DROP 当前仍被保留。\n\n"
+        "如果你已人工核验游戏状态，可选择“是”直接恢复普通网络。\n"
+        "程序只会清除 REJECT/DROP，不会点击、启动或登录游戏。\n\n"
+        "是否按你的人工判断恢复网络？",
+        "BoomBeachSonarAuto - 人工处理",
+        0x00000004 | 0x00000030 | 0x00000100 | 0x00001000,
+    )
+    return result == 6  # IDYES
+
+
+def offer_manual_network_recovery(confirm_func=None) -> bool:
+    """异常现场给用户一次宽松选择；取消时不修改任何网络规则。"""
+    confirm = confirm_func or _show_manual_network_recovery_dialog
+    if not confirm():
+        logger.warning("用户取消人工网络恢复；继续保留 DROP/REJECT")
+        return False
+
+    try:
+        handled_drop = restore_network_after_manual_verification()
+    except Exception as exc:
+        logger.error("人工核验后的网络恢复失败: %s", exc)
+        return False
+
+    logger.info(
+        "普通网络已恢复；%s",
+        "原先检测到 DROP" if handled_drop else "原先未检测到 DROP",
+    )
+    return True
+
+
 def wait_until_occur(
     template_path: str | Path,
     timeout: float = 30.0,
@@ -585,6 +657,10 @@ if __name__ == "__main__":
         adb.ensure_root_shell()
         cleanup_reject_network("主流程启动")
         main(level)
+    except BaseException:
+        if _has_pending_probe_request():
+            offer_manual_network_recovery()
+        raise
     finally:
         cleanup_weak_network("主流程结束")
         cleanup_reject_network("主流程结束")

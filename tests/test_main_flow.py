@@ -9,6 +9,8 @@ class FakeAdb:
 
     def __init__(self, *args, **kwargs):
         self.calls = []
+        self.weak_network_enabled = False
+        self.reject_network_enabled = False
         FakeAdb.instances.append(self)
 
     def delay(self, seconds):
@@ -35,15 +37,30 @@ class FakeAdb:
 
     def enable_weak_network(self, package_name):
         self.calls.append(("enable_weak_network", package_name))
+        self.weak_network_enabled = True
 
     def disable_weak_network(self, package_name):
         self.calls.append(("disable_weak_network", package_name))
+        self.weak_network_enabled = False
 
     def enable_reject_network(self, package_name):
         self.calls.append(("enable_reject_network", package_name))
+        self.reject_network_enabled = True
 
     def disable_reject_network(self, package_name):
         self.calls.append(("disable_reject_network", package_name))
+        self.reject_network_enabled = False
+
+    def is_weak_network_enabled(self, package_name):
+        self.calls.append(("is_weak_network_enabled", package_name))
+        return self.weak_network_enabled
+
+    def is_reject_network_enabled(self, package_name):
+        self.calls.append(("is_reject_network_enabled", package_name))
+        return self.reject_network_enabled
+
+    def ensure_root_shell(self):
+        self.calls.append(("ensure_root_shell",))
 
 
 class DummyMatch:
@@ -65,6 +82,44 @@ class MainFlowTest(unittest.TestCase):
         sys.modules.pop("main", None)
         self.utils.AdbController = self.original_adb_controller
         FakeAdb.instances.clear()
+
+    def test_manual_recovery_offer_cancel_keeps_network_rules_untouched(self):
+        self.adb.weak_network_enabled = True
+        self.adb.reject_network_enabled = True
+
+        result = self.main.offer_manual_network_recovery(lambda: False)
+
+        self.assertFalse(result)
+        self.assertTrue(self.adb.weak_network_enabled)
+        self.assertTrue(self.adb.reject_network_enabled)
+        self.assertEqual(self.adb.calls, [])
+
+    def test_manual_recovery_offer_clears_rules_without_clicking_game(self):
+        package_name = self.main.GAME_PACKAGE_NAME
+        self.adb.weak_network_enabled = True
+        self.adb.reject_network_enabled = True
+
+        result = self.main.offer_manual_network_recovery(lambda: True)
+
+        self.assertTrue(result)
+        self.assertFalse(self.adb.weak_network_enabled)
+        self.assertFalse(self.adb.reject_network_enabled)
+        self.assertNotIn("click", [call[0] for call in self.adb.calls])
+        disable_reject = self.adb.calls.index(("disable_reject_network", package_name))
+        disable_drop = self.adb.calls.index(("disable_weak_network", package_name))
+        self.assertLess(disable_reject, disable_drop)
+
+    def test_manual_recovery_offer_reports_failure_when_drop_remains(self):
+        self.adb.weak_network_enabled = True
+
+        def leave_drop_enabled(package_name):
+            self.adb.calls.append(("disable_weak_network", package_name))
+
+        self.adb.disable_weak_network = leave_drop_enabled
+        result = self.main.offer_manual_network_recovery(lambda: True)
+
+        self.assertFalse(result)
+        self.assertTrue(self.adb.weak_network_enabled)
 
     def test_enter_activity_recovers_after_activity_button_missing(self):
         waits = iter(

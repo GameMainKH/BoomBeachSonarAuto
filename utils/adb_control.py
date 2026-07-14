@@ -192,6 +192,28 @@ class AdbController:
         self._set_reject_network_rule(uid, enabled=False)
         logger.info("已关闭 APP REJECT 断网: package=%s uid=%s", package_name, uid)
 
+    def is_weak_network_enabled(self, package_name: str) -> bool:
+        """读取 IPv4/IPv6 真实规则，判断指定 APP 是否仍处于 DROP 弱网。"""
+        package_name = package_name.strip()
+        if not package_name:
+            _raise_value_error("包名不能为空")
+        uid = self._get_package_uid(package_name)
+        return self._is_weak_network_rule_active(uid) or self._is_ipv6_rule_active(
+            uid,
+            "BBMA_WEAKNET",
+        )
+
+    def is_reject_network_enabled(self, package_name: str) -> bool:
+        """读取 IPv4/IPv6 真实规则，判断指定 APP 是否仍处于 REJECT 断网。"""
+        package_name = package_name.strip()
+        if not package_name:
+            _raise_value_error("包名不能为空")
+        uid = self._get_package_uid(package_name)
+        return self._is_reject_network_rule_active(uid) or self._is_ipv6_rule_active(
+            uid,
+            "BBMA_REJECTNET",
+        )
+
     def get_weak_network_diagnostics(self, package_name: str) -> str:
         """读取当前弱网规则和计数器，方便排查脚本运行时的真实状态。"""
         package_name = package_name.strip()
@@ -595,6 +617,14 @@ class AdbController:
     def _is_reject_network_rule_active(self, uid: int) -> bool:
         """确认当前 iptables 中是否存在指定 UID 的 REJECT 断网规则。"""
         script = f"iptables -C OUTPUT -m owner --uid-owner {uid} -j BBMA_REJECTNET"
+        result = self._run_privileged_script(script, check=False)
+        return result.returncode == 0
+
+    def _is_ipv6_rule_active(self, uid: int, chain: str) -> bool:
+        """确认可用的 ip6tables 中是否仍有指定 UID 的规则。"""
+        if not self._is_ip6tables_available():
+            return False
+        script = f"ip6tables -C OUTPUT -m owner --uid-owner {uid} -j {chain}"
         result = self._run_privileged_script(script, check=False)
         return result.returncode == 0
 
