@@ -13,8 +13,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -29,6 +31,35 @@ from utils.adb_control import AdbController
 
 GUI_LOG_FILE = PROJECT_ROOT / "_debug" / "logs" / "weak_network_gui.log"
 _cleanup_done = False
+
+
+class AdbSession:
+    """按设备地址复用 ADB 控制器，保留连接和设备能力缓存。"""
+
+    def __init__(self, controller_factory=AdbController):
+        self._controller_factory = controller_factory
+        self._controllers: dict[str, AdbController] = {}
+
+    def get_controller(self, serial: str) -> AdbController:
+        """返回已准备好的控制器；同一地址只连接和检查 root 一次。"""
+        serial = serial.strip()
+        if not serial:
+            raise ValueError("模拟器 ADB 地址不能为空")
+
+        adb = self._controllers.get(serial)
+        if adb is None:
+            adb = self._controller_factory(serial, auto_connect=False)
+            adb.connect()
+            adb.ensure_root_shell()
+            self._controllers[serial] = adb
+        return adb
+
+    def controllers(self) -> tuple[AdbController, ...]:
+        """返回本次工具运行期间已经实际使用过的控制器。"""
+        return tuple(self._controllers.values())
+
+
+_adb_session = AdbSession()
 
 
 def write_gui_log(message: str) -> None:
@@ -58,35 +89,33 @@ def cleanup_weak_network(reason: str = "工具退出") -> None:
         return
 
     _cleanup_done = True
-    try:
-        message = f"{reason}，正在关闭弱网和断网"
-        print(message)
-        write_gui_log(message)
-        adb = AdbController(ADB_SERIAL)
-        adb.ensure_root_shell()
-    except Exception as exc:
-        message = f"初始化清理失败: {exc}"
-        print(message)
-        write_gui_log(message)
-        return
+    message = f"{reason}，正在关闭弱网和断网"
+    print(message)
+    write_gui_log(message)
+    controllers = _adb_session.controllers()
+    if not controllers:
+        try:
+            controllers = (_adb_session.get_controller(ADB_SERIAL),)
+        except Exception as exc:
+            message = f"初始化清理失败: {exc}"
+            print(message)
+            write_gui_log(message)
+            return
 
-    try:
-        write_gui_log(format_weak_network_diagnostics(adb, "退出清理前"))
-        adb.disable_weak_network(GAME_PACKAGE_NAME)
-        write_gui_log(format_weak_network_diagnostics(adb, "退出清理后"))
-    except Exception as exc:
-        message = f"关闭弱网失败: {exc}"
-        print(message)
-        write_gui_log(message)
+    for adb in controllers:
+        try:
+            adb.disable_weak_network(GAME_PACKAGE_NAME)
+        except Exception as exc:
+            message = f"关闭 {adb.serial} 弱网失败: {exc}"
+            print(message)
+            write_gui_log(message)
 
-    try:
-        write_gui_log(format_reject_network_diagnostics(adb, "退出清理前"))
-        adb.disable_reject_network(GAME_PACKAGE_NAME)
-        write_gui_log(format_reject_network_diagnostics(adb, "退出清理后"))
-    except Exception as exc:
-        message = f"关闭断网失败: {exc}"
-        print(message)
-        write_gui_log(message)
+        try:
+            adb.disable_reject_network(GAME_PACKAGE_NAME)
+        except Exception as exc:
+            message = f"关闭 {adb.serial} 断网失败: {exc}"
+            print(message)
+            write_gui_log(message)
 
 
 def handle_exit_signal(signum: int, _frame) -> None:
@@ -109,36 +138,51 @@ class WeakNetworkWorker(QObject):
 
     finished = pyqtSignal(bool, str, str)
 
-    def __init__(self, mode: str, enabled: bool):
+    def __init__(
+        self,
+        session: AdbSession,
+        serial: str,
+        mode: str,
+        enabled: bool,
+        detailed_diagnostics: bool = False,
+    ):
         super().__init__()
+        self.session = session
+        self.serial = serial
         self.mode = mode
         self.enabled = enabled
+        self.detailed_diagnostics = detailed_diagnostics
 
     def run(self) -> None:
         """执行一次弱网开启或关闭操作。"""
         action = "开启" if self.enabled else "关闭"
         label = "弱网(DROP)" if self.mode == "drop" else "断网(REJECT)"
         try:
-            adb = AdbController(ADB_SERIAL)
-            adb.ensure_root_shell()
+            adb = self.session.get_controller(self.serial)
             if self.mode == "drop":
-                logs = [format_weak_network_diagnostics(adb, f"{action}前")]
+                logs = []
+                if self.detailed_diagnostics:
+                    logs.append(format_weak_network_diagnostics(adb, f"{action}前"))
                 if self.enabled:
                     adb.enable_weak_network(GAME_PACKAGE_NAME)
                     message = "弱网(DROP)已开启"
                 else:
                     adb.disable_weak_network(GAME_PACKAGE_NAME)
                     message = "弱网(DROP)已关闭"
-                logs.append(format_weak_network_diagnostics(adb, f"{action}后"))
+                if self.detailed_diagnostics:
+                    logs.append(format_weak_network_diagnostics(adb, f"{action}后"))
             elif self.mode == "reject":
-                logs = [format_reject_network_diagnostics(adb, f"{action}前")]
+                logs = []
+                if self.detailed_diagnostics:
+                    logs.append(format_reject_network_diagnostics(adb, f"{action}前"))
                 if self.enabled:
                     adb.enable_reject_network(GAME_PACKAGE_NAME)
                     message = "断网(REJECT)已开启"
                 else:
                     adb.disable_reject_network(GAME_PACKAGE_NAME)
                     message = "断网(REJECT)已关闭"
-                logs.append(format_reject_network_diagnostics(adb, f"{action}后"))
+                if self.detailed_diagnostics:
+                    logs.append(format_reject_network_diagnostics(adb, f"{action}后"))
             else:
                 raise ValueError(f"不支持的操作模式: {self.mode}")
             self.finished.emit(True, message, "\n".join(logs))
@@ -157,6 +201,9 @@ class WeakNetworkWindow(QMainWindow):
         self._thread: QThread | None = None
         self._worker: WeakNetworkWorker | None = None
 
+        self.serial_edit = QLineEdit(ADB_SERIAL)
+        self.serial_edit.setPlaceholderText("例如 127.0.0.1:5555 或 emulator-5554")
+        self.diagnostics_checkbox = QCheckBox("记录完整规则诊断（较慢）")
         self.status_label = QLabel("当前未执行操作")
         self.open_button = QPushButton("开启弱网(DROP)")
         self.close_button = QPushButton("关闭弱网(DROP)")
@@ -178,8 +225,12 @@ class WeakNetworkWindow(QMainWindow):
         reject_button_layout.addWidget(self.reject_close_button)
 
         layout = QVBoxLayout()
-        layout.addWidget(QLabel(f"目标设备: {ADB_SERIAL}"))
+        serial_layout = QHBoxLayout()
+        serial_layout.addWidget(QLabel("模拟器 ADB 地址:"))
+        serial_layout.addWidget(self.serial_edit)
+        layout.addLayout(serial_layout)
         layout.addWidget(QLabel(f"目标包名: {GAME_PACKAGE_NAME}"))
+        layout.addWidget(self.diagnostics_checkbox)
         layout.addLayout(button_layout)
         layout.addLayout(reject_button_layout)
         layout.addWidget(self.status_label)
@@ -199,13 +250,23 @@ class WeakNetworkWindow(QMainWindow):
 
         action = "开启" if enabled else "关闭"
         label = "弱网(DROP)" if mode == "drop" else "断网(REJECT)"
+        serial = self.serial_edit.text().strip()
+        if not serial:
+            QMessageBox.warning(self, "设备地址无效", "请填写模拟器 ADB 地址")
+            return
         self.status_label.setText(f"正在{action}{label}...")
-        self._append_log(f"开始{action}{label}")
-        write_gui_log(f"开始{action}{label}")
+        self._append_log(f"开始{action}{label}: {serial}")
+        write_gui_log(f"开始{action}{label}: {serial}")
         self._set_buttons_enabled(False)
 
         self._thread = QThread(self)
-        self._worker = WeakNetworkWorker(mode, enabled)
+        self._worker = WeakNetworkWorker(
+            _adb_session,
+            serial,
+            mode,
+            enabled,
+            self.diagnostics_checkbox.isChecked(),
+        )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._on_operation_finished)
@@ -238,6 +299,8 @@ class WeakNetworkWindow(QMainWindow):
         self.close_button.setEnabled(enabled)
         self.reject_open_button.setEnabled(enabled)
         self.reject_close_button.setEnabled(enabled)
+        self.serial_edit.setEnabled(enabled)
+        self.diagnostics_checkbox.setEnabled(enabled)
 
     def _append_log(self, message: str) -> None:
         """向窗口日志追加一行状态。"""
