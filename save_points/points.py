@@ -16,17 +16,17 @@ from config import BASE_DIR, LEVEL_GRID_SIZES, SAVED_POINTS_FILE
 from utils.diamond_centers import centers_from_quad, detect_diamond_centers, read_image
 
 POINTS_VERSION = 2
-SHARED_POINT_LEVEL = 10
+SHARED_POINT_LEVEL = 8
 IMAGES_DIR = BASE_DIR / "save_points" / "imgs"
 
 
 def point_template_level(level: int) -> int:
-    """第 10 关及以后共用第 10 关的图片、四角和中心点。"""
+    """第 8 关及以后共用第 8 关的图片、四角和中心点。"""
     return min(int(level), SHARED_POINT_LEVEL)
 
 
 def _normalize_points_data(data: dict[str, Any]) -> dict[str, Any]:
-    """兼容旧的逐关数据，以第 10 关为准收拢重复配置。"""
+    """兼容旧的逐关数据，以第 8 关为准收拢重复配置。"""
     result = deepcopy(data)
     levels = result.setdefault("levels", {})
     if not isinstance(levels, dict):
@@ -124,7 +124,7 @@ def save_level_entry(
     entry: dict[str, Any],
     path: str | Path = SAVED_POINTS_FILE,
 ) -> None:
-    """保存关卡模板；保存第 10 关以后任一关即更新共享点位。"""
+    """保存关卡模板；保存第 8 关以后任一关即更新共享点位。"""
     data = load_points_data(path)
     data.setdefault("levels", {})[str(point_template_level(level))] = entry
     save_points_data(data, path)
@@ -200,7 +200,7 @@ def generate_points_json(
 
 
 def iter_template_images(images_dir: str | Path = IMAGES_DIR) -> list[Path]:
-    """仅列出 1–9 关和第 10 关共享模板，忽略旧的重复图片。"""
+    """仅列出 1–7 关和第 8 关共享模板，忽略旧的重复图片。"""
     images_dir = Path(images_dir)
     if not images_dir.exists():
         return []
