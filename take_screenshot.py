@@ -1,6 +1,9 @@
-# 只是一个截图小工具而已
+# 从刚进入、尚未拖动的海域详情页采集点位模板。
 from utils import AdbController
+from utils.board_view import prepare_board_view
+from save_points.points import IMAGES_DIR, point_template_level
 
+level = 8  # 前七关填写实际关卡；第 8 关及以后共用 8.png。
 adb = AdbController()
-# 第 8 关及以后共用此模板；前七关请使用对应编号。
-adb.take_screenshot(r".\save_points\imgs\8.png")
+prepare_board_view(adb, level)
+adb.take_screenshot(IMAGES_DIR / f"{point_template_level(level)}.png")

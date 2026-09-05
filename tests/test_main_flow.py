@@ -121,6 +121,62 @@ class MainFlowTest(unittest.TestCase):
         self.assertFalse(result)
         self.assertTrue(self.adb.weak_network_enabled)
 
+    def test_board_pan_runs_once_per_entry_only_from_level_eight(self):
+        pan = ("swipe", 1000, 500, 1000, 545)
+        for level in (7, 8, 27, 50):
+            for re_enter in (False, True):
+                with self.subTest(level=level, re_enter=re_enter):
+                    self.adb.calls.clear()
+                    self.adb.weak_network_enabled = re_enter
+                    with patch.object(self.main, "wait_until_occur", return_value=DummyMatch((30, 40))):
+                        self.main.enter_activity(level=level, re_enter=re_enter)
+                        self.main.enter_activity(level=level, re_enter=re_enter)
+                    self.assertEqual(self.adb.calls.count(pan), 2 if level >= 8 else 0)
+                    if level >= 8:
+                        first_pan = self.adb.calls.index(pan)
+                        self.assertLess(self.adb.calls.index(("click", 1205, 644)), first_pan)
+                        self.assertEqual(self.adb.calls[first_pan - 1], ("delay", 1.5))
+                        self.assertEqual(self.adb.calls[first_pan + 1], ("delay", 1.5))
+
+    def test_failed_entry_never_pans_an_unknown_page(self):
+        with patch.object(self.main, "wait_until_occur", side_effect=[DummyMatch((30, 40)), None]):
+            with self.assertRaises(self.main.ProbeProtocolError):
+                self.main.enter_activity(level=8, re_enter=True, max_retries=1)
+        self.assertNotIn(("swipe", 1000, 500, 1000, 545), self.adb.calls)
+
+    def test_pan_failure_aborts_without_retrying_or_restarting(self):
+        self.adb.weak_network_enabled = True
+        with (
+            patch.object(self.main, "wait_until_occur", return_value=DummyMatch((30, 40))),
+            patch.object(self.adb, "swipe", side_effect=RuntimeError("swipe failed")) as swipe,
+            patch.object(self.main, "_restart_game_for_activity_retry") as restart,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "swipe failed"):
+                self.main.enter_activity(level=8, re_enter=True, max_retries=3)
+        swipe.assert_called_once_with(1000, 500, 1000, 545)
+        restart.assert_not_called()
+        self.assertTrue(self.adb.weak_network_enabled)
+        self.assertNotIn(("disable_weak_network", self.main.GAME_PACKAGE_NAME), self.adb.calls)
+
+    def test_high_level_probe_pans_before_result_and_again_after_rollback(self):
+        self.adb.weak_network_enabled = True
+        waits = [DummyMatch((i, i)) for i in range(1, 7)]
+        with (
+            patch.object(self.main, "wait_until_occur", side_effect=waits),
+            patch.object(self.main, "click_template", return_value=True),
+            patch.object(self.main, "is_diamond_hit", return_value=True),
+        ):
+            self.assertTrue(self.main._probe_cell(8, [[0] * 10 for _ in range(10)], (0, 1), (688, 130), 1))
+        pan = ("swipe", 1000, 500, 1000, 545)
+        pan_indexes = [i for i, call in enumerate(self.adb.calls) if call == pan]
+        self.assertEqual(len(pan_indexes), 2)
+        result_index = next(i for i, call in enumerate(self.adb.calls) if call[0] == "read_screenshot" and call[1].name == "debug_after.png")
+        drop_off = self.adb.calls.index(("disable_weak_network", self.main.GAME_PACKAGE_NAME))
+        self.assertLess(pan_indexes[0], result_index)
+        self.assertLess(result_index, drop_off)
+        self.assertLess(drop_off, pan_indexes[1])
+        self.assertIsNone(self.main._active_probe)
+
     def test_enter_activity_recovers_after_activity_button_missing(self):
         waits = iter(
             [
@@ -136,7 +192,7 @@ class MainFlowTest(unittest.TestCase):
             "wait_until_occur",
             side_effect=lambda *args, **kwargs: next(waits),
         ):
-            self.main.enter_activity(max_retries=2)
+            self.main.enter_activity(level=1, max_retries=2)
 
         package_name = self.main.GAME_PACKAGE_NAME
         self.assertEqual(self.adb.calls.count(("close_app", package_name)), 1)
@@ -160,7 +216,7 @@ class MainFlowTest(unittest.TestCase):
     def test_enter_activity_stops_after_max_retries(self):
         with patch.object(self.main, "wait_until_occur", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "最大重试次数 2"):
-                self.main.enter_activity(max_retries=2)
+                self.main.enter_activity(level=1, max_retries=2)
 
         package_name = self.main.GAME_PACKAGE_NAME
         self.assertEqual(self.adb.calls.count(("close_app", package_name)), 2)
@@ -179,7 +235,7 @@ class MainFlowTest(unittest.TestCase):
             "wait_until_occur",
             side_effect=lambda *args, **kwargs: next(waits),
         ):
-            self.main.enter_activity(re_enter=True, max_retries=1)
+            self.main.enter_activity(level=1, re_enter=True, max_retries=1)
 
         package_name = self.main.GAME_PACKAGE_NAME
         self.assertNotIn(("enable_weak_network", package_name), self.adb.calls)
@@ -193,7 +249,7 @@ class MainFlowTest(unittest.TestCase):
                 self.main.ProbeProtocolError,
                 "第二次进入活动",
             ):
-                self.main.enter_activity(re_enter=True, max_retries=1)
+                self.main.enter_activity(level=1, re_enter=True, max_retries=1)
 
         package_name = self.main.GAME_PACKAGE_NAME
         self.assertNotIn(("close_app", package_name), self.adb.calls)
@@ -329,7 +385,7 @@ class MainFlowTest(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual(execute.call_count, 2)
         self.assertEqual(execute.call_args_list[0], execute.call_args_list[1])
-        recover.assert_called_once_with()
+        recover.assert_called_once_with(level=1)
 
 
 if __name__ == "__main__":

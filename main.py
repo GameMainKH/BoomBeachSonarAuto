@@ -15,6 +15,7 @@ from config import (
     USE_SAVED_POINTS,
 )
 from save_points.points import read_saved_points, read_saved_quad
+from utils.board_view import prepare_board_view
 from utils import AdbController, MatchResult, find_template, get_logger, is_diamond_hit
 from utils.diamond_centers import detect_diamond_centers
 from utils.hit_map import save_hit_map_image
@@ -126,7 +127,7 @@ def register_exit_cleanup() -> None:
             signal.signal(signum, handle_exit_signal)
 
 
-def enter_activity(re_enter: bool = False, max_retries: int = 5) -> None:
+def enter_activity(re_enter: bool = False, max_retries: int = 5, *, level: int) -> None:
     """进入活动详情页。
 
     ``re_enter=False`` 用于没有待验证请求的普通进入，允许重启恢复；
@@ -163,6 +164,7 @@ def enter_activity(re_enter: bool = False, max_retries: int = 5) -> None:
 
         adb.delay(0.7).click(*ACTIVITY_DETAIL_POINT)
         if wait_until_occur(QUIT_ACTIVITY_TEMPLATE, timeout=15) is not None:
+            prepare_board_view(adb, level)
             return
 
         last_failure = "进入活动详情界面失败"
@@ -423,7 +425,7 @@ def _probe_cell(
                 max_preflight_retries,
                 exc,
             )
-            enter_activity()
+            enter_activity(level=level)
 
     raise AssertionError("探测重试循环意外结束")
 
@@ -467,7 +469,7 @@ def _execute_probe_transaction(
                 "点击格子后未找到退出按钮；待发送请求状态未知，保留 DROP 弱网"
             )
 
-        enter_activity(re_enter=True, max_retries=1)
+        enter_activity(level=level, re_enter=True, max_retries=1)
         after_img = adb.delay(1).read_screenshot(RUN_DEBUG_DIR / "debug_after.png")
         transaction.advance(ProbePhase.RESULT_VISIBLE)
 
@@ -513,14 +515,14 @@ def _discard_pending_request_and_prepare_next_probe(
     adb.delay(0.8).click(*retry.center)
     transaction.advance(ProbePhase.LOGIN_RECOVERING)
 
-    restart_process()
+    restart_process(level=transaction.level)
     transaction.advance(ProbePhase.COMPLETE)
 
 
-def restart_process() -> None:
+def restart_process(*, level: int) -> None:
     """在请求确认丢弃后恢复网络登录，并进入下一轮探测页面。"""
     disable_weak_network()
-    enter_activity()
+    enter_activity(level=level)
 
 
 def restore_network_after_manual_verification() -> bool:
@@ -635,7 +637,7 @@ def main(level: int) -> Path | None:
             logger.error("当前不在海岛主界面，无法启动脚本")
             return None
 
-        enter_activity()
+        enter_activity(level=level)
         base_img, quad = handle_game_level(
             level,
             hit_map,
