@@ -1,6 +1,8 @@
 import importlib
 import sys
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -29,7 +31,11 @@ class FakeAdb:
 
     def read_screenshot(self, output_path=None):
         self.calls.append(("read_screenshot", output_path))
-        return object()
+        from save_points.points import IMAGES_DIR
+        from utils.diamond_centers import read_image
+        if not hasattr(self, "_image"):
+            self._image = read_image(IMAGES_DIR / "8.png")
+        return self._image
 
     def swipe(self, start_x, start_y, end_x, end_y):
         self.calls.append(("swipe", start_x, start_y, end_x, end_y))
@@ -77,6 +83,9 @@ class MainFlowTest(unittest.TestCase):
         sys.modules.pop("main", None)
         self.main = importlib.import_module("main")
         self.adb = self.main.adb
+        self._view_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._view_directory.cleanup)
+        self.main.RUN_DEBUG_DIR = Path(self._view_directory.name)
 
     def tearDown(self):
         sys.modules.pop("main", None)
@@ -121,6 +130,52 @@ class MainFlowTest(unittest.TestCase):
         self.assertFalse(result)
         self.assertTrue(self.adb.weak_network_enabled)
 
+    def test_high_level_pair_uses_separate_views_and_clicks_current_offset(self):
+        import cv2
+        import numpy as np
+        from utils.board_view import BoardView
+        from save_points.points import IMAGES_DIR
+        from utils.diamond_centers import read_image
+        reference = read_image(IMAGES_DIR / "8.png")
+        def shifted(dx, dy):
+            return cv2.warpAffine(reference, np.float32([[1, 0, dx], [0, 1, dy]]), (1280, 720))
+        before, result, rollback = shifted(2, -10), shifted(1, -5), shifted(-3, 4)
+        self.main._board_views.current = BoardView(8, 1, 2, -10)
+        self.adb.weak_network_enabled = True
+        with (
+            patch.object(self.adb, "read_screenshot", side_effect=[before, result, result, result, rollback, rollback]),
+            patch.object(self.main, "wait_until_occur", return_value=DummyMatch((30, 40))),
+            patch.object(self.main, "click_template", return_value=True),
+            patch.object(self.main, "is_diamond_hit", return_value=True) as classify,
+        ):
+            self.main._probe_cell(8, [[0]*10 for _ in range(10)], (0, 1), (688, 130), 1)
+        first, second, center = classify.call_args.args
+        self.assertTrue(np.array_equal(first[30:-30, 30:-30], reference[30:-30, 30:-30]))
+        self.assertTrue(np.array_equal(second[30:-30, 30:-30], reference[30:-30, 30:-30]))
+        self.assertEqual(center, (688, 130))
+        self.assertEqual(self.adb.calls.count(("click", 690, 120)), 1)
+        self.assertEqual(self.main._board_point(8, (688, 130)), (685, 134))
+
+    def test_failed_alignment_during_pending_probe_keeps_drop_and_does_not_replay(self):
+        import numpy as np
+        from utils.board_view import BoardAlignmentError, BoardView
+        self.main._board_views.current = BoardView(8, 1)
+        self.adb.weak_network_enabled = True
+        with (
+            patch.object(self.adb, "read_screenshot", return_value=np.zeros((720, 1280, 3), dtype=np.uint8)),
+            patch.object(self.main, "wait_until_occur", return_value=DummyMatch((30, 40))),
+            patch.object(self.main, "click_template", return_value=True),
+            patch.object(self.main, "_restart_game_for_activity_retry") as restart,
+        ):
+            with self.assertRaises(BoardAlignmentError):
+                self.main._probe_cell(8, [[0]*10 for _ in range(10)], (0, 1), (688, 130), 1)
+        self.assertEqual(self.adb.calls.count(("click", 688, 130)), 1)
+        self.assertTrue(self.main._active_probe.request_may_be_pending)
+        self.assertTrue(self.adb.weak_network_enabled)
+        self.assertNotIn(("disable_weak_network", self.main.GAME_PACKAGE_NAME), self.adb.calls)
+        self.assertIsNone(self.main._board_views.current)
+        restart.assert_not_called()
+
     def test_board_pan_runs_once_per_entry_only_from_level_eight(self):
         pan = ("swipe", 1000, 500, 1000, 545)
         for level in (7, 8, 27, 50):
@@ -159,6 +214,8 @@ class MainFlowTest(unittest.TestCase):
         self.assertNotIn(("disable_weak_network", self.main.GAME_PACKAGE_NAME), self.adb.calls)
 
     def test_high_level_probe_pans_before_result_and_again_after_rollback(self):
+        from utils.board_view import BoardView
+        self.main._board_views.current = BoardView(8, 0)
         self.adb.weak_network_enabled = True
         waits = [DummyMatch((i, i)) for i in range(1, 7)]
         with (

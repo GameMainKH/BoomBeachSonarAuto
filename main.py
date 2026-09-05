@@ -15,7 +15,7 @@ from config import (
     USE_SAVED_POINTS,
 )
 from save_points.points import read_saved_points, read_saved_quad
-from utils.board_view import prepare_board_view
+from utils.board_view import BoardViewTracker, prepare_board_view
 from utils import AdbController, MatchResult, find_template, get_logger, is_diamond_hit
 from utils.diamond_centers import detect_diamond_centers
 from utils.hit_map import save_hit_map_image
@@ -44,6 +44,7 @@ RETRY_TEMPLATE = TEMPLATE_DIR / "retry.png"
 ACTIVITY_DETAIL_POINT = (1205, 644)
 ACTIVITY_LIST_SWIPE = (1000, 660, 1000, 180)
 RUN_DEBUG_DIR = SCREENSHOT_DIR / "run_debug"
+_board_views = BoardViewTracker()
 
 _weak_network_cleanup_done = False
 _active_probe: "ProbeTransaction | None" = None
@@ -127,6 +128,18 @@ def register_exit_cleanup() -> None:
             signal.signal(signum, handle_exit_signal)
 
 
+def _prepare_aligned_board(level: int) -> None:
+    _board_views.invalidate()
+    prepare_board_view(adb, level)
+    view = _board_views.establish(adb, level, RUN_DEBUG_DIR / "alignment")
+    logger.info("第 %s 关视角已对齐：entry=%s offset=(%s,%s)",
+                level, view.entry_id, view.dx, view.dy)
+
+
+def _board_point(level: int, point: tuple[int, int]) -> tuple[int, int]:
+    return _board_views.snapshot(level).point(point)
+
+
 def enter_activity(re_enter: bool = False, max_retries: int = 5, *, level: int) -> None:
     """进入活动详情页。
 
@@ -137,6 +150,7 @@ def enter_activity(re_enter: bool = False, max_retries: int = 5, *, level: int) 
     if max_retries <= 0:
         raise ValueError(f"max_retries 必须大于 0: {max_retries}")
 
+    _board_views.invalidate()
     last_failure = "进入活动失败"
     for attempt in range(1, max_retries + 1):
         adb.delay(0.5)
@@ -164,7 +178,7 @@ def enter_activity(re_enter: bool = False, max_retries: int = 5, *, level: int) 
 
         adb.delay(0.7).click(*ACTIVITY_DETAIL_POINT)
         if wait_until_occur(QUIT_ACTIVITY_TEMPLATE, timeout=15) is not None:
-            prepare_board_view(adb, level)
+            _prepare_aligned_board(level)
             return
 
         last_failure = "进入活动详情界面失败"
@@ -213,6 +227,13 @@ def get_click_points(
 ) -> tuple[list[tuple[int, int]], np.ndarray]:
     """按配置读取人工点位，失败时回退到自动识别。"""
     grid_size = get_level_grid_size(level)
+    if level >= 8:
+        _board_views.snapshot(level)
+        saved_points = read_saved_points(level, expected_n=grid_size)
+        saved_quad = read_saved_quad(level)
+        if saved_points is None or saved_quad is None:
+            raise RuntimeError("对齐海域缺少共享人工点位，禁止回退动态外框")
+        return saved_points, saved_quad
 
     if USE_SAVED_POINTS:
         try:
@@ -240,6 +261,7 @@ def handle_game_level(
     adb.delay(1.5)
     grid_img = adb.read_screenshot()
     click_points, grid_quad = get_click_points(level, grid_img)
+    grid_quad = _board_views.snapshot(level).quad(grid_quad)
 
     submarines = get_configured_submarines(level, SUBMARINES)
     if submarines is None:
@@ -456,9 +478,12 @@ def _execute_probe_transaction(
     try:
         before_img = adb.read_screenshot(RUN_DEBUG_DIR / "debug_before.png")
 
+        before_frame = _board_views.frame(before_img, level, RUN_DEBUG_DIR / "debug_before.png")
+
         # 点击命令一旦发出，就保守地认为客户端可能已经暂存验证请求。
+        screen_point = _board_point(level, (x, y))
         transaction.advance(ProbePhase.REQUEST_PENDING)
-        adb.click(x, y)
+        adb.click(*screen_point)
         adb.delay(0.3)
 
         if not click_template(
@@ -473,7 +498,7 @@ def _execute_probe_transaction(
         after_img = adb.delay(1).read_screenshot(RUN_DEBUG_DIR / "debug_after.png")
         transaction.advance(ProbePhase.RESULT_VISIBLE)
 
-        hit = is_diamond_hit(before_img, after_img, (x, y))
+        hit = is_diamond_hit(before_frame.reference_image(), _board_views.frame(after_img, level, RUN_DEBUG_DIR / "debug_after.png").reference_image(), (x, y))
         transaction.hit = hit
         transaction.advance(ProbePhase.RESULT_RECORDED)
 
@@ -502,6 +527,7 @@ def _discard_pending_request_and_prepare_next_probe(
     transaction: ProbeTransaction,
 ) -> None:
     """通过 REJECT 丢弃暂存请求，恢复登录并准备下一轮。"""
+    _board_views.invalidate()
     adb.enable_reject_network(GAME_PACKAGE_NAME)
     retry = wait_until_occur(RETRY_TEMPLATE, timeout=20)
     if retry is None:
@@ -521,6 +547,7 @@ def _discard_pending_request_and_prepare_next_probe(
 
 def restart_process(*, level: int) -> None:
     """在请求确认丢弃后恢复网络登录，并进入下一轮探测页面。"""
+    _board_views.invalidate()
     disable_weak_network()
     enter_activity(level=level)
 
@@ -621,6 +648,8 @@ def click_template(
     if match_result is None:
         return False
 
+    if Path(template_path) == QUIT_ACTIVITY_TEMPLATE:
+        _board_views.invalidate()
     adb.delay(0.5).click(*match_result.center)
     return True
 
