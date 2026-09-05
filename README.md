@@ -189,7 +189,7 @@ _debug/screenshots/run_debug/
 
 1. 修改 `config.py` 中的 `SUBMARINES`，填写目标海域的潜艇长度列表。潜艇长度可在声呐界面左侧查看。
 2. 模拟器进入目标声呐界面，进入即可，不要手动拖放或缩放海域视角。
-3. 修改 `take_screenshot.py` 中的保存路径，将截图保存为 `save_points/imgs/<海域编号>.png`，例如 `save_points/imgs/12.png`，然后运行：
+3. 修改 `take_screenshot.py` 中的保存路径，第 1–9 关保存为 `save_points/imgs/<海域编号>.png`；第 10 关及以后统一保存为 `save_points/imgs/10.png`，然后运行：
 
 ```powershell
 python take_screenshot.py
@@ -208,6 +208,8 @@ python _debug/point_editor.py
 主流程默认 `USE_SAVED_POINTS = True`，会优先读取 `save_points/points.json`：
 
 - 固定点位包含关卡截图路径、网格边长、图片尺寸、大菱形四角和每个小格中心点。
+- 第 1–9 关各自校准；第 10 关及以后共用 `save_points/imgs/10.png` 和 JSON 的 `levels["10"]`，中心点与四角只需调整一次。编辑器显示“第 10 关及以后（共用）”，保存即影响所有后续关卡。
+- 点位格式版本 2 仅保存 10 份模板。读取旧版本时以第 10 关为共享基准，保存时移除第 11 关起的重复记录；不再需要同名复制图片。新增后续海域若仍为相同 10×10 布局，可直接复用共享点位。
 
 人工校准点位：
 

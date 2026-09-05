@@ -2,4 +2,5 @@
 from utils import AdbController
 
 adb = AdbController()
-adb.take_screenshot(r".\save_points\imgs\14.png")
+# 第 10 关及以后共用此模板；前九关请使用对应编号。
+adb.take_screenshot(r".\save_points\imgs\10.png")

@@ -25,7 +25,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from config import BASE_DIR, LEVEL_GRID_SIZES, SAVED_POINTS_FILE
 from save_points.points import (
     IMAGES_DIR,
+    SHARED_POINT_LEVEL,
     detect_level_entry,
+    iter_template_images,
     load_points_data,
     make_level_entry,
     points_from_quad,
@@ -345,7 +347,7 @@ class PointEditorWindow(QMainWindow):
         """刷新左侧关卡列表。"""
         self.level_list.clear()
         for level in sorted(self._entries):
-            item = QListWidgetItem(f"第 {level} 关")
+            item = QListWidgetItem(_level_label(level))
             item.setData(Qt.ItemDataRole.UserRole, level)
             self.level_list.addItem(item)
 
@@ -461,23 +463,19 @@ class PointEditorWindow(QMainWindow):
 
         entry = self._entries[self._current_level]
         dirty = "未保存" if self._current_level in self._dirty_levels else "已保存"
-        text = f"第 {self._current_level} 关：n={entry['n']} points={len(entry['points'])}，{dirty}"
+        text = f"{_level_label(self._current_level)}：n={entry['n']} points={len(entry['points'])}，{dirty}"
         if prefix:
             text = f"{prefix}。{text}"
         self.statusBar().showMessage(text)
 
 
 def _iter_images() -> list[Path]:
-    """按关卡编号返回 save_points/imgs 中的图片。"""
-    if not IMAGES_DIR.exists():
-        return []
+    """按模板编号返回图片，后续关卡只显示一个共享项。"""
+    return iter_template_images(IMAGES_DIR)
 
-    paths = [
-        path
-        for path in IMAGES_DIR.iterdir()
-        if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"} and path.stem.isdigit()
-    ]
-    return sorted(paths, key=lambda item: int(item.stem))
+
+def _level_label(level: int) -> str:
+    return f"第 {level} 关及以后（共用）" if level == SHARED_POINT_LEVEL else f"第 {level} 关"
 
 
 def _to_point(point: Any) -> tuple[int, int]:
