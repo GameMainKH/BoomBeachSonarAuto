@@ -83,28 +83,11 @@
 
 ## 安装
 
-### 雷电 14 等缺少 owner 内核匹配的环境
+### 雷电 14 兼容说明
 
-网络控制默认仍使用 `-m owner --uid-owner UID`。只有 iptables 明确报告 `owner` 匹配不存在、扩展无法加载、版本不受支持或不认识 `--uid-owner` 时，才为对应的 IPv4/IPv6 后端自动启用 eBPF。权限不足、ADB 故障、锁冲突、其他规则错误不会触发回退；eBPF 自身失败也会终止，不会改为整机断网。
+雷电 14 等缺少 `owner` 支持的环境会自动使用 eBPF 兼容模式，仍然只控制游戏网络，无需手动切换。
 
-回退仍然按游戏 UID 匹配：独立的 `BPF_PROG_TYPE_SOCKET_FILTER` 程序通过 `bpf_get_socket_uid()` 读取 socket UID，iptables 使用 `-m bpf --object-pinned` 调用它。DROP 和 REJECT 保持独立；程序不修改 Android netd 的共享 BPF 程序或映射。
-
-后端选择发生在网络控制层，不改变探测事务的状态转换：
-
-```text
-原流程：DROP -> 单次点击 -> 二次进入读取 -> REJECT -> retry -> 正常网络登录
-接入后：DROP -> 单次点击 -> 二次进入读取 -> REJECT -> retry -> 正常网络登录
-         ^                                  ^
-         各自优先 owner；明确不可用才使用同一 UID 的 eBPF 匹配
-```
-
-eBPF 回退要求 root、已挂载的 `/sys/fs/bpf`、可用的 `xt_bpf` 和 socket UID helper。随仓库提供的加载器目前支持 **Linux/Android x86_64**，已在雷电 14 的 Android 14 / `5.15.178+` 内核验证。其他架构仍可使用原 owner 后端；需要回退时会明确报错。使用源码运行不需要 NDK、编译器或额外 Python 依赖。自行打包时须同时包含 `utils/native/uid_bpf_x86_64`，保留在 `utils/native/` 下。
-
-加载器保存在设备的 `/data/local/tmp/bbsa_uid_bpf/`，UID 程序固定在 `/sys/fs/bpf/bbsa_uid_v1/uid_<UID>`。部署时检查加载器 SHA256，复用及查询时检查 BPF 类型和内核程序 tag，避免仅凭文件名认定 UID 隔离有效。已有 pin 身份不符时终止，不覆盖或删除它。维护者可使用 GNU binutils 运行 `python utils/native/build_uid_bpf.py` 重建；重建后须同步更新 `utils/uid_bpf.py` 的 SHA256。
-
-关闭某一模式会从 IPv4/IPv6 实际规则中删除该 UID 的 owner 和 eBPF 跳转，重启脚本后也能识别残留。清除 REJECT 不会清除 DROP；不会清空共享规则链或移除其他 UID 的跳转。未引用的链和经过校验的 pin 会保留复用，它们本身不会拦截流量。存在 IPv6 路由却无法配置/读取 IPv6 规则时终止，不能仅成功隔离 IPv4 后继续。任何失败都不会主动撤销已经安装的阻断规则。
-
-验证范围：自动测试覆盖 owner 优先、限定回退、双栈失败、身份冲突和重启后清理。雷电 14 实例内另以独立 mount/network namespace、回环网络和测试 UID 验证了实际控制器的自动回退、双栈 TCP 拦截、其他 UID 通信和重启后清理；未对游戏进行点击、探测或投弹，也未验证游戏缓存请求的实际丢弃流程。UDP 的 UID 匹配已验证，但本地 `sendto` 在 OUTPUT DROP 下可能立即返回 `EPERM`，不能把 TCP 的超时表现推广到 UDP。
+此模式目前支持 x86_64 模拟器，需要开启 root；环境不兼容时程序会报错并停止。
 
 ### Python 环境
 
