@@ -1,29 +1,38 @@
-__pycache__/
-*.py[cod]
-.venv/
-.mypy_cache
-outputs/*.png
-_debug/screenshots/*.png
-_debug/screenshots/run_debug/*.png
-_debug/screenshots/fullyauto/
-_debug/logs/*.log
-
-AGENTS.md
-COLLABORATION.md
-.codex
-.agents
-
-save_points/dbg
-_screen.png
-*.log
+# Python environments and caches
 .venv/
 venv/
-.env
-.vscode
-.pytest_cache
-.agents
-.codex
-.mypy_cache
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
 
+# Editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local configuration and agent workspace files
+.env
+.env.*
+!.env.example
+.codex/
+.agents/
 AGENTS.md
 COLLABORATION.md
+
+# Generated images, diagnostics, and logs
+outputs/
+_debug/screenshots/
+_debug/logs/
+save_points/dbg/
+_screen.png
+*.log

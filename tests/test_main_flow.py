@@ -76,6 +76,7 @@ class MainFlowTest(unittest.TestCase):
         self.utils.AdbController = FakeAdb
         sys.modules.pop("main", None)
         self.main = importlib.import_module("main")
+        self.main.SONAR_ENTRY_USE_IMAGE = False
         self.adb = self.main.adb
 
     def tearDown(self):
@@ -149,13 +150,75 @@ class MainFlowTest(unittest.TestCase):
             [
                 call
                 for call in self.adb.calls
-                if call == ("swipe", 1000, 660, 1000, 180)
+                if call[0] == "swipe"
             ],
             [
-                ("swipe", 1000, 660, 1000, 180),
-                ("swipe", 1000, 660, 1000, 180),
+                ("swipe", *self.main.ACTIVITY_LIST_SWIPE),
             ],
         )
+
+    def test_image_entry_searches_both_directions_and_uses_offset(self):
+        import numpy as np
+
+        self.main.ACTIVITY_SCROLL_MAX_SWIPES = 1
+        self.main.SONAR_ENTRY_CLICK_OFFSET = (10, 20)
+        with patch.object(self.adb, "read_screenshot", return_value=np.zeros((720, 1280, 3))), patch.object(
+            self.main, "find_template", side_effect=[None, None, DummyMatch((1100, 400))]
+        ):
+            self.assertTrue(self.main.click_sonar_entry())
+        self.assertEqual(
+            [call for call in self.adb.calls if call[0] == "swipe"],
+            [("swipe", 1000, 660, 1000, 510), ("swipe", 1000, 510, 1000, 660)],
+        )
+        self.assertIn(("click", 1110, 420), self.adb.calls)
+
+    def test_visible_image_entry_does_not_scroll(self):
+        import numpy as np
+
+        with patch.object(self.adb, "read_screenshot", return_value=np.zeros((720, 1280, 3))), patch.object(
+            self.main, "find_template", return_value=DummyMatch((1100, 400))
+        ):
+            self.assertTrue(self.main.click_sonar_entry())
+        self.assertFalse(any(call[0] == "swipe" for call in self.adb.calls))
+
+    def test_hidden_button_scrolls_then_clicks_new_position(self):
+        from types import SimpleNamespace
+
+        with patch.object(self.adb, "read_screenshot", return_value=SimpleNamespace(shape=(720, 1280, 3))), patch.object(
+            self.main, "find_template", side_effect=[DummyMatch((1100, 620)), DummyMatch((1100, 560))]
+        ):
+            self.assertTrue(self.main.click_sonar_entry())
+        self.assertIn(("swipe", 1000, 660, 1000, 600), self.adb.calls)
+        self.assertIn(("click", 1210, 655), self.adb.calls)
+        self.assertNotIn(("click", 1210, 715), self.adb.calls)
+
+    def test_image_lost_after_alignment_never_clicks_stale_position(self):
+        from types import SimpleNamespace
+
+        self.main.ACTIVITY_SCROLL_MAX_SWIPES = 0
+        with patch.object(self.adb, "read_screenshot", return_value=SimpleNamespace(shape=(720, 1280, 3))), patch.object(
+            self.main, "find_template", side_effect=[DummyMatch((1100, 620)), None]
+        ):
+            self.assertFalse(self.main.click_sonar_entry())
+        self.assertFalse(any(call[0] == "click" for call in self.adb.calls))
+
+    def test_missing_image_during_reentry_preserves_pending_request(self):
+        self.main.SONAR_ENTRY_USE_IMAGE = True
+        with patch.object(self.main, "wait_until_occur", return_value=DummyMatch((30, 40))), patch.object(
+            self.main, "click_sonar_entry", return_value=False
+        ):
+            with self.assertRaises(self.main.ProbeProtocolError):
+                self.main.enter_activity(re_enter=True)
+        self.assertNotIn(("disable_weak_network", self.main.GAME_PACKAGE_NAME), self.adb.calls)
+        self.assertNotIn(("click", *self.main.ACTIVITY_DETAIL_POINT), self.adb.calls)
+
+    def test_image_search_is_bounded_and_does_not_click_on_failure(self):
+        self.main.ACTIVITY_SCROLL_MAX_SWIPES = 1
+        with patch.object(self.main, "find_template", return_value=None) as match:
+            self.assertFalse(self.main.click_sonar_entry())
+        self.assertEqual(match.call_count, 4)
+        self.assertEqual(sum(call[0] == "swipe" for call in self.adb.calls), 3)
+        self.assertFalse(any(call[0] == "click" for call in self.adb.calls))
 
     def test_enter_activity_stops_after_max_retries(self):
         with patch.object(self.main, "wait_until_occur", return_value=None):
@@ -183,7 +246,7 @@ class MainFlowTest(unittest.TestCase):
 
         package_name = self.main.GAME_PACKAGE_NAME
         self.assertNotIn(("enable_weak_network", package_name), self.adb.calls)
-        self.assertNotIn(("swipe", 1000, 660, 1000, 180), self.adb.calls)
+        self.assertFalse(any(call[0] == "swipe" for call in self.adb.calls))
         self.assertIn(("click", 30, 40), self.adb.calls)
         self.assertIn(("click", 1205, 644), self.adb.calls)
 
