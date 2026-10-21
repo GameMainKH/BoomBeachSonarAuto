@@ -6,6 +6,20 @@ from time import monotonic, sleep
 import numpy as np
 
 from config import (
+    ACTIVITY_DETAIL_POINT,
+    ACTIVITY_LIST_SWIPE,
+    ACTIVITY_SCROLL_DISTANCE,
+    ACTIVITY_LIST_VISIBLE_Y,
+    ACTIVITY_BUTTON_MARGIN,
+    ACTIVITY_ALIGN_DISTANCE,
+    ACTIVITY_ALIGN_MAX_SWIPES,
+    ACTIVITY_SCROLL_MAX_SWIPES,
+    ACTIVITY_SCROLL_START,
+    ACTIVITY_SCROLL_SETTLE_SECONDS,
+    SONAR_ENTRY_USE_IMAGE,
+    SONAR_ENTRY_TEMPLATE,
+    SONAR_ENTRY_THRESHOLD,
+    SONAR_ENTRY_CLICK_OFFSET,
     GAME_PACKAGE_NAME,
     LEVEL_GRID_SIZES,
     OUTPUT_DIR,
@@ -40,8 +54,6 @@ LOGIN_TEMPLATE = TEMPLATE_DIR / "login.png"
 QUIT_ACTIVITY_TEMPLATE = TEMPLATE_DIR / "quit_activity.png"
 RETRY_TEMPLATE = TEMPLATE_DIR / "retry.png"
 
-ACTIVITY_DETAIL_POINT = (1205, 644)
-ACTIVITY_LIST_SWIPE = (1000, 660, 1000, 180)
 RUN_DEBUG_DIR = SCREENSHOT_DIR / "run_debug"
 
 _weak_network_cleanup_done = False
@@ -126,6 +138,62 @@ def register_exit_cleanup() -> None:
             signal.signal(signum, handle_exit_signal)
 
 
+def click_sonar_entry() -> bool:
+    """从当前滚动位置寻找声呐卡片；先向下翻，再反向搜索，次数有界。"""
+    x, bottom = ACTIVITY_SCROLL_START
+    distance = ACTIVITY_SCROLL_DISTANCE
+    if distance <= 0 or distance >= bottom or ACTIVITY_SCROLL_MAX_SWIPES < 0:
+        raise ValueError("活动栏滚动距离必须大于 0 且小于起点 y，次数不能为负")
+
+    if not (0 < ACTIVITY_ALIGN_DISTANCE < bottom) or ACTIVITY_ALIGN_MAX_SWIPES < 0:
+        raise ValueError("活动栏微调距离或次数无效")
+    if ACTIVITY_BUTTON_MARGIN < 0 or ACTIVITY_LIST_VISIBLE_Y[1] - ACTIVITY_LIST_VISIBLE_Y[0] <= 2 * ACTIVITY_BUTTON_MARGIN:
+        raise ValueError("活动栏可见范围或按钮边距无效")
+
+    def locate_and_click() -> bool:
+        for adjustment in range(ACTIVITY_ALIGN_MAX_SWIPES + 1):
+            adb.delay(ACTIVITY_SCROLL_SETTLE_SECONDS)
+            screenshot = adb.read_screenshot()
+            match = find_template(screenshot, SONAR_ENTRY_TEMPLATE, threshold=SONAR_ENTRY_THRESHOLD)
+            if match is None:
+                return False
+            dx, dy = SONAR_ENTRY_CLICK_OFFSET
+            target = (match.center[0] + dx, match.center[1] + dy)
+            height, width = screenshot.shape[:2]
+            top = max(0, ACTIVITY_LIST_VISIBLE_Y[0]) + ACTIVITY_BUTTON_MARGIN
+            lower = min(height, ACTIVITY_LIST_VISIBLE_Y[1]) - ACTIVITY_BUTTON_MARGIN
+            if not (0 <= target[0] < width):
+                raise ValueError(f"声呐入口横向点击偏移超出截图范围: {target}")
+            if top <= target[1] < lower:
+                logger.info("识别到声呐活动入口，点击 %s", target)
+                adb.click(*target)
+                return True
+            if adjustment == ACTIVITY_ALIGN_MAX_SWIPES:
+                logger.warning("声呐按钮仍在列表可见区域之外，跳过点击")
+                return False
+            # 图片已找到但箭头未完整露出；小幅滚动后必须重新截图定位。
+            logger.info("声呐按钮预计位于 %s，微调滚动后重新识别", target)
+            if target[1] >= lower:
+                adb.swipe(x, bottom, x, bottom - ACTIVITY_ALIGN_DISTANCE)
+            else:
+                adb.swipe(x, bottom - ACTIVITY_ALIGN_DISTANCE, x, bottom)
+        return False
+
+    if locate_and_click():
+        return True
+    # 列表可能记住上次位置，因此也反向搜索；反向覆盖去程和原位置上方。
+    for start_y, end_y, count in (
+        (bottom, bottom - distance, ACTIVITY_SCROLL_MAX_SWIPES),
+        (bottom - distance, bottom, ACTIVITY_SCROLL_MAX_SWIPES * 2),
+    ):
+        for _ in range(count):
+            adb.swipe(x, start_y, x, end_y)
+            if locate_and_click():
+                return True
+    logger.warning("滚动搜索后仍未识别到声呐活动入口，请检查模板与分辨率")
+    return False
+
+
 def enter_activity(re_enter: bool = False, max_retries: int = 5) -> None:
     """进入活动详情页。
 
@@ -158,11 +226,14 @@ def enter_activity(re_enter: bool = False, max_retries: int = 5) -> None:
         adb.click(*res.center)  # 点击活动按钮进入活动界面
         if not re_enter:
             enable_weak_network(0.2)
-            adb.delay(0.4).swipe(*ACTIVITY_LIST_SWIPE)  # 首次进入需要展示全部选项
-            adb.delay(0.2).swipe(*ACTIVITY_LIST_SWIPE)
-
-        adb.delay(0.7).click(*ACTIVITY_DETAIL_POINT)
-        if wait_until_occur(QUIT_ACTIVITY_TEMPLATE, timeout=15) is not None:
+        if SONAR_ENTRY_USE_IMAGE:
+            entry_clicked = click_sonar_entry()
+        else:
+            if not re_enter:
+                adb.delay(0.4).swipe(*ACTIVITY_LIST_SWIPE)
+            adb.delay(0.7).click(*ACTIVITY_DETAIL_POINT)
+            entry_clicked = True
+        if entry_clicked and wait_until_occur(QUIT_ACTIVITY_TEMPLATE, timeout=15) is not None:
             return
 
         last_failure = "进入活动详情界面失败"
@@ -650,13 +721,13 @@ def main(level: int) -> Path | None:
         logger.info("脚本总运行时间：%s", format_elapsed(monotonic() - run_started_at))
 
 
-if __name__ == "__main__":
+def run(level: int = 1) -> Path | None:
+    """命令行与 GUI 共用的入口，保留异常恢复和退出清理。"""
     register_exit_cleanup()
-    level = 2
     try:
         adb.ensure_root_shell()
         cleanup_reject_network("主流程启动")
-        main(level)
+        return main(level)
     except BaseException:
         if _has_pending_probe_request():
             offer_manual_network_recovery()
@@ -664,3 +735,7 @@ if __name__ == "__main__":
     finally:
         cleanup_weak_network("主流程结束")
         cleanup_reject_network("主流程结束")
+
+
+if __name__ == "__main__":
+    run()

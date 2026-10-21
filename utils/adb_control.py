@@ -5,7 +5,7 @@ from time import sleep
 
 import cv2
 
-from config import ADB_SERIAL, DEFAULT_SCREENSHOT_NAME, SCREENSHOT_DIR
+from config import ADB_EXECUTABLE, ADB_SERIAL, DEFAULT_SCREENSHOT_NAME, SCREENSHOT_DIR
 from utils.logger import get_logger
 from utils.uid_network import UidNetworkRules
 
@@ -41,7 +41,7 @@ class AdbController:
 
     def _run(self, args: list[str], *, device: bool = True, check: bool = True) -> subprocess.CompletedProcess[str]:
         ''' 执行 adb 命令，自动添加设备参数。 '''
-        command = ["adb"]
+        command = [ADB_EXECUTABLE]
         if device:
             command.extend(["-s", self.serial])
         command.extend(args)
@@ -404,7 +404,7 @@ class AdbController:
         self._ip6tables_available = None
         self._uid_network.backends.clear()
         self._uid_network.bpf.deployed = False
-        disconnect_command = ["adb", "disconnect", self.serial]
+        disconnect_command = [ADB_EXECUTABLE, "disconnect", self.serial]
         logger.info("断开 adb 设备连接: %s", self.serial)
         subprocess.run(disconnect_command, capture_output=True, text=True)
         sleep(0.5)
