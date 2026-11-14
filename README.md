@@ -1,5 +1,7 @@
 # BoomBeachSonarAuto
 
+**当前仅支持国际服（`com.supercell.boombeach`），已不支持国服。**
+
 基于 **ADB + OpenCV** 的海岛奇兵声呐活动界面自动化与菱形网格识别工具。项目会通过 ADB 获取模拟器截图，使用模板匹配进入活动页面，读取人工校准点位或自动识别菱形网格中心点，优先使用搜索算法探索潜艇位置，缺少潜艇配置时回退逐格扫描，最后生成命中可视化图片。
 
 > 说明：本项目仅用于图像识别、自动化流程和个人学习研究。使用前请确认不会违反目标应用的用户协议或平台规则。请自觉在24小时后删除。
@@ -45,6 +47,8 @@
 ```text
 .
 ├── main.py                    # 主入口，执行自动化流程
+├── gui.py                     # 桌面控制台
+├── gui_worker.py              # 桌面控制台的独立任务进程
 ├── config.py                  # 路径、ADB 设备、包名、日志、网格和模板匹配配置
 ├── take_screenshot.py         # 保存海域截图到 save_points/imgs/，用于新增海域点位校准
 ├── requirements.txt           # Python 依赖
@@ -77,7 +81,7 @@
 - 已安装并可在命令行使用的 `adb`工具。
 - 一台已开启 ADB 调试的安卓设备或模拟器。
 - 设备需要支持 `adb root`，否则脚本无法使用 iptables 自动控制弱网或断网。
-- 海岛奇兵国服（国际服未测试），如需使用请自行修改 `GAME_PACKAGE_NAME` 和流程坐标。
+- 已安装海岛奇兵国际服客户端。
 - 建议使用雷电模拟器，并将分辨率设置为 `1280x720`。
 - 当前模板图片与设备分辨率、游戏界面语言、UI 状态尽量一致。
 
@@ -113,7 +117,8 @@ source .venv/bin/activate
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `ADB_SERIAL` | `127.0.0.1:5555` | ADB 设备序列号或模拟器连接地址 |
-| `GAME_PACKAGE_NAME` | `com.tencent.tmgp.supercell.boombeach` | 默认控制的游戏包名 |
+| `ADB_EXECUTABLE` | `adb` | ADB 命令或可执行文件路径 |
+| `GAME_PACKAGE_NAME` | `com.supercell.boombeach` | 国际服游戏包名 |
 | `TEMPLATE_DIR` | `template/` | 模板图片目录 |
 | `SCREENSHOT_DIR` | `_debug/screenshots/` | 截图和运行调试图保存目录 |
 | `LOG_FILE` | `_debug/logs/bbma.log` | 主流程日志文件路径 |
@@ -145,26 +150,36 @@ adb -s 127.0.0.1:5555 shell id -u
 
 第二条命令输出 `0` 才表示当前 ADB shell 已具备 root 权限。
 
+### 声呐活动入口
+
+默认使用 `template/sonar_pic_alive.png` 定位活动卡片。卡片未出现在当前画面时，脚本会分段滚动并反向搜索。找到卡片后，脚本按图片中心和配置偏移计算点击位置。按钮未完整露出时，会微调滚动并重新识图。达到搜索上限仍找不到卡片时，本次入口定位失败。
+
+- `SONAR_ENTRY_THRESHOLD = 0.85` 是卡片匹配阈值。
+- `SONAR_ENTRY_CLICK_OFFSET = (110, 95)` 表示从模板中心向右 110、向下 95 像素点击。模板和偏移在国际服 63.211 的 `1280x720` 画面验证过。
+- `ACTIVITY_SCROLL_DISTANCE` 控制单次手势的像素距离，`ACTIVITY_SCROLL_MAX_SWIPES` 控制向下翻的次数上限。反向搜索最多执行两倍次数。
+- 设置 `SONAR_ENTRY_USE_IMAGE = False` 可恢复原有固定坐标流程。坐标见 `ACTIVITY_LIST_SWIPE` 和 `ACTIVITY_DETAIL_POINT`。
+
 ## 使用方法
+
+### 桌面控制台
+
+运行 `python gui.py`，填写设备地址和游戏内当前海域编号，再点击“保存并开始探索”。脚本按填写的编号读取点位和潜艇配置，请与游戏画面核对。设备地址和日志级别保存在 `config.py`。
+
+控制台显示任务日志和探索进度，完成后可预览命中图。启动探索前请先关闭调试工具。探索期间关闭控制台会等待任务结束。需要人工确认是否恢复网络时，控制台会显示确认对话框。
+
+### 命令行
 
 如果探测异常中断并保留了 DROP，程序会弹出 Windows 是/否对话框，询问是否按你的人工判断恢复普通网络。选择“是”后只清除 REJECT/DROP 并复查 IPv4/IPv6 规则，不会识别、点击、启动或登录游戏；选择“否”则保持现场不变，不需要运行任何恢复命令。
 
 1. 启动安卓模拟器或连接安卓设备，分辨率为 `1280x720`。
-2. 确认设备已登录到游戏主界面，并且声呐活动入口可见。
+2. 确认设备已登录到游戏主界面，且声呐活动正在进行。
 3. 确认 `template/` 目录下的模板图片能匹配当前界面。
-4. 如需运行指定关卡，在 `main.py` 底部修改 `level`。
+4. 在 `main.py` 底部确认 `level` 与游戏当前海域一致。脚本按这个值读取点位和潜艇配置。
 
 ```python
 if __name__ == "__main__":
-    register_exit_cleanup()
-    level = 1
-    try:
-        adb.ensure_root_shell()
-        cleanup_reject_network("主流程启动")
-        main(level)
-    finally:
-        cleanup_weak_network("主流程结束")
-        cleanup_reject_network("主流程结束")
+    level = 2
+    run(level)
 ```
 
 运行主程序：

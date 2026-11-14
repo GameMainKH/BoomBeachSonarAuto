@@ -7,6 +7,14 @@ from typing import Iterator, TextIO
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
+_progress_listener = None
+
+
+def set_progress_listener(listener):
+    """GUI 可订阅原有进度更新；命令行继续使用 tqdm。"""
+    global _progress_listener
+    _progress_listener = listener
+
 
 def format_elapsed(seconds: float) -> str:
     """把运行秒数格式化为 HH:MM:SS。"""
@@ -37,12 +45,14 @@ def fixed_progress_bar(
         dynamic_ncols=True,
         leave=True,
         file=file,
-        disable=disable,
+        disable=True if _progress_listener is not None else disable,
         bar_format=(
             "{desc} {percentage:3.0f}%|{bar:20}| "
             "{n_fmt}/{total_fmt}{unit} | {postfix}"
         ),
     )
+    bar.gui_description = description
+    bar.gui_unit = unit
     # 非交互输出不创建动态栏，也不需要改写现有日志 handler。
     log_context = logging_redirect_tqdm() if not bar.disable else nullcontext()
     try:
@@ -56,6 +66,14 @@ def update_fixed_progress(bar: tqdm, current: int, postfix: str) -> None:
     """把底栏更新到绝对进度，避免重复反馈导致累计误差。"""
     bar.n = min(max(int(current), 0), int(bar.total))
     bar.set_postfix_str(postfix, refresh=True)
+    if _progress_listener is not None:
+        _progress_listener({
+            "description": bar.gui_description,
+            "current": bar.n,
+            "total": int(bar.total),
+            "unit": bar.gui_unit,
+            "postfix": postfix,
+        })
 
 
 @dataclass(frozen=True)

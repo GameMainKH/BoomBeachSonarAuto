@@ -6,10 +6,25 @@ from utils.progress import (
     fixed_progress_bar,
     format_elapsed,
     update_fixed_progress,
+    set_progress_listener,
 )
 
 
 class ProgressTest(unittest.TestCase):
+    def test_gui_receives_progress_without_terminal_bar(self):
+        output = io.StringIO()
+        updates = []
+        set_progress_listener(updates.append)
+        try:
+            with fixed_progress_bar(total=16, description="第 11 关探索", unit="格", file=output) as bar:
+                update_fixed_progress(bar, 4, "确认 1/5 | 探测 12/100 | 最坏剩余 88")
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(updates[0]["current"], 4)
+            self.assertEqual(updates[0]["total"], 16)
+            self.assertIn("确认 1/5", updates[0]["postfix"])
+        finally:
+            set_progress_listener(None)
+
     def test_format_elapsed_supports_long_runs(self):
         self.assertEqual(format_elapsed(0), "00:00:00")
         self.assertEqual(format_elapsed(3661.9), "01:01:01")
