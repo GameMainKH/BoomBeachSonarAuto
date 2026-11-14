@@ -43,20 +43,14 @@ class MainWindow(QMainWindow):
         settings.setMinimumWidth(340)
         form = QFormLayout(settings)
         self.serial = QLineEdit(self.config["ADB_SERIAL"])
-        self.package = QComboBox()
-        self.package.addItem("国服", "com.tencent.tmgp.supercell.boombeach")
-        self.package.addItem("国际服", "com.supercell.boombeach")
-        package_index = self.package.findData(self.config["GAME_PACKAGE_NAME"])
-        self.package.setCurrentIndex(package_index)
-        self.package.setPlaceholderText("请选择游戏区服")
         self.level = QSpinBox()
-        self.level.setRange(1, self.config["MAX_LEVEL"])
-        self.level.setValue(1)
+        self.level.setRange(0, self.config["MAX_LEVEL"])
+        self.level.setSpecialValueText("填写游戏内当前海域")
         self.log_level = QComboBox()
         self.log_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
         self.log_level.setCurrentText(self.config["LOG_LEVEL"])
         for label, widget in [("设备地址", self.serial),
-                              ("游戏区服", self.package), ("海域", self.level),
+                              ("当前海域", self.level),
                               ("日志级别", self.log_level)]:
             form.addRow(label, widget)
         self.settings = settings
@@ -97,6 +91,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.progress_details)
         controls = QHBoxLayout()
         self.start_button = QPushButton("保存并开始探索")
+        self.start_button.setEnabled(False)
+        self.level.valueChanged.connect(lambda level: self.start_button.setEnabled(level > 0))
         self.start_button.clicked.connect(self.start_run)
         self.status = QLabel("就绪")
         controls.addWidget(self.start_button)
@@ -115,13 +111,12 @@ class MainWindow(QMainWindow):
         self.logs.ensureCursorVisible()
 
     def save_settings(self):
-        if not self.serial.text().strip() or self.package.currentData() is None:
-            QMessageBox.warning(self, "配置不完整", "请填写设备地址并选择游戏区服。")
+        if not self.serial.text().strip():
+            QMessageBox.warning(self, "配置不完整", "请填写设备地址。")
             return False
         try:
             save_config(ROOT / "config.py", {
                 "ADB_SERIAL": self.serial.text().strip(),
-                "GAME_PACKAGE_NAME": self.package.currentData(),
                 "LOG_LEVEL": self.log_level.currentText(),
             })
         except Exception as exc:
@@ -141,7 +136,7 @@ class MainWindow(QMainWindow):
         return process
 
     def start_run(self):
-        if self.process is not None:
+        if self.process is not None or not self.level.value():
             return
         if any(p.state() != QProcess.ProcessState.NotRunning for p in self.tool_processes):
             QMessageBox.warning(self, "调试工具仍在运行", "请先关闭调试工具，再启动探索，避免同时操作设备。")
@@ -158,7 +153,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat("等待探索数据")
         self.progress_details.setText("已确认潜艇 — | 探测次数 — | 最坏剩余 — | 总运行 —")
         self.tabs.setCurrentIndex(0)
-        self.append_log(f"正在启动海域 {self.run_level}，设备：{self.serial.text().strip()}，区服：{self.package.currentText()}\n")
+        self.append_log(f"正在启动海域 {self.run_level}，设备：{self.serial.text().strip()}\n")
         self.decoder.reset()
         self.output_buffer = ""
         process = self.new_process()

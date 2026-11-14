@@ -26,7 +26,7 @@ SONAR_ENTRY_THRESHOLD = 0.85
 # 相对于潜艇图片中心，点击右下方绿色箭头：正 x 向右，正 y 向下。
 # 按参考截图比例换算到现有 286x131 模板的估计值，需实机微调。
 SONAR_ENTRY_CLICK_OFFSET = (110, 95)
-# 每次手指向上移动的距离（列表向下翻），以及每个方向最多滑动次数。
+# 每次手指向上移动的距离（列表向下翻），以及向下翻的最大次数，反向最多两倍。
 ACTIVITY_SCROLL_DISTANCE = 150
 ACTIVITY_SCROLL_MAX_SWIPES = 6
 ACTIVITY_SCROLL_START = (1000, 660)
@@ -41,7 +41,7 @@ ACTIVITY_ALIGN_DISTANCE = 60
 ACTIVITY_ALIGN_MAX_SWIPES = 3
 # 关闭图片识别时使用的旧坐标方案。
 ACTIVITY_DETAIL_POINT = (1205, 644)
-ACTIVITY_LIST_SWIPE = (1000, 660, 1000, 590)
+ACTIVITY_LIST_SWIPE = (1000, 660, 1000, 180)
 
 
 # 目前支持的最大关卡

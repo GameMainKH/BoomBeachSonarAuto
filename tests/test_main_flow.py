@@ -1,6 +1,7 @@
 import importlib
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -76,7 +77,6 @@ class MainFlowTest(unittest.TestCase):
         self.utils.AdbController = FakeAdb
         sys.modules.pop("main", None)
         self.main = importlib.import_module("main")
-        self.main.SONAR_ENTRY_USE_IMAGE = False
         self.adb = self.main.adb
 
     def tearDown(self):
@@ -123,6 +123,7 @@ class MainFlowTest(unittest.TestCase):
         self.assertTrue(self.adb.weak_network_enabled)
 
     def test_enter_activity_recovers_after_activity_button_missing(self):
+        self.main.SONAR_ENTRY_USE_IMAGE = False
         waits = iter(
             [
                 None,
@@ -153,16 +154,15 @@ class MainFlowTest(unittest.TestCase):
                 if call[0] == "swipe"
             ],
             [
-                ("swipe", *self.main.ACTIVITY_LIST_SWIPE),
+                ("swipe", 1000, 660, 1000, 180),
+                ("swipe", 1000, 660, 1000, 180),
             ],
         )
 
     def test_image_entry_searches_both_directions_and_uses_offset(self):
-        import numpy as np
-
         self.main.ACTIVITY_SCROLL_MAX_SWIPES = 1
         self.main.SONAR_ENTRY_CLICK_OFFSET = (10, 20)
-        with patch.object(self.adb, "read_screenshot", return_value=np.zeros((720, 1280, 3))), patch.object(
+        with patch.object(self.adb, "read_screenshot", return_value=SimpleNamespace(shape=(720, 1280, 3))), patch.object(
             self.main, "find_template", side_effect=[None, None, DummyMatch((1100, 400))]
         ):
             self.assertTrue(self.main.click_sonar_entry())
@@ -173,17 +173,13 @@ class MainFlowTest(unittest.TestCase):
         self.assertIn(("click", 1110, 420), self.adb.calls)
 
     def test_visible_image_entry_does_not_scroll(self):
-        import numpy as np
-
-        with patch.object(self.adb, "read_screenshot", return_value=np.zeros((720, 1280, 3))), patch.object(
+        with patch.object(self.adb, "read_screenshot", return_value=SimpleNamespace(shape=(720, 1280, 3))), patch.object(
             self.main, "find_template", return_value=DummyMatch((1100, 400))
         ):
             self.assertTrue(self.main.click_sonar_entry())
         self.assertFalse(any(call[0] == "swipe" for call in self.adb.calls))
 
     def test_hidden_button_scrolls_then_clicks_new_position(self):
-        from types import SimpleNamespace
-
         with patch.object(self.adb, "read_screenshot", return_value=SimpleNamespace(shape=(720, 1280, 3))), patch.object(
             self.main, "find_template", side_effect=[DummyMatch((1100, 620)), DummyMatch((1100, 560))]
         ):
@@ -193,8 +189,6 @@ class MainFlowTest(unittest.TestCase):
         self.assertNotIn(("click", 1210, 715), self.adb.calls)
 
     def test_image_lost_after_alignment_never_clicks_stale_position(self):
-        from types import SimpleNamespace
-
         self.main.ACTIVITY_SCROLL_MAX_SWIPES = 0
         with patch.object(self.adb, "read_screenshot", return_value=SimpleNamespace(shape=(720, 1280, 3))), patch.object(
             self.main, "find_template", side_effect=[DummyMatch((1100, 620)), None]
@@ -203,7 +197,6 @@ class MainFlowTest(unittest.TestCase):
         self.assertFalse(any(call[0] == "click" for call in self.adb.calls))
 
     def test_missing_image_during_reentry_preserves_pending_request(self):
-        self.main.SONAR_ENTRY_USE_IMAGE = True
         with patch.object(self.main, "wait_until_occur", return_value=DummyMatch((30, 40))), patch.object(
             self.main, "click_sonar_entry", return_value=False
         ):
@@ -230,6 +223,7 @@ class MainFlowTest(unittest.TestCase):
         self.assertEqual(self.adb.calls.count(("open_app", package_name)), 2)
 
     def test_re_enter_skips_first_enter_only_actions(self):
+        self.main.SONAR_ENTRY_USE_IMAGE = False
         waits = iter(
             [
                 DummyMatch((30, 40)),
@@ -294,6 +288,7 @@ class MainFlowTest(unittest.TestCase):
                 side_effect=lambda *args, **kwargs: next(waits),
             ),
             patch.object(self.main, "click_template", return_value=True),
+            patch.object(self.main, "click_sonar_entry", return_value=True) as click_sonar_entry,
             patch.object(self.main, "is_diamond_hit", return_value=True),
         ):
             result = self.main._probe_cell(
@@ -317,6 +312,7 @@ class MainFlowTest(unittest.TestCase):
             }
         ]
         self.assertTrue(result)
+        self.assertEqual(click_sonar_entry.call_count, 2)
         self.assertEqual(hit_map[0][1], 1)
         self.assertIsNone(self.main._active_probe)
         self.assertEqual(
@@ -347,6 +343,7 @@ class MainFlowTest(unittest.TestCase):
                 side_effect=lambda *args, **kwargs: next(waits),
             ),
             patch.object(self.main, "click_template", return_value=True),
+            patch.object(self.main, "click_sonar_entry", return_value=True),
             patch.object(self.main, "is_diamond_hit", return_value=False),
         ):
             with self.assertRaisesRegex(

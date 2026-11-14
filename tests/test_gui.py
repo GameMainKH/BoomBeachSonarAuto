@@ -33,11 +33,19 @@ class GuiTests(unittest.TestCase):
     def test_settings_loaded_and_idle(self):
         window = MainWindow()
         self.assertEqual(window.serial.text(), window.config["ADB_SERIAL"])
+        self.assertFalse(window.start_button.isEnabled())
+        with patch.object(window, "save_settings") as save_settings:
+            window.start_run()
+            save_settings.assert_not_called()
+        window.level.setValue(1)
         self.assertTrue(window.start_button.isEnabled())
+        window.level.setValue(0)
+        self.assertFalse(window.start_button.isEnabled())
         window.close()
 
     def test_failed_launch_restores_controls(self):
         window = MainWindow()
+        window.level.setValue(2)
         with patch.object(window, "save_settings", return_value=True), patch.object(QProcess, "start"):
             window.start_run()
         self.assertFalse(window.start_button.isEnabled())

@@ -6,24 +6,24 @@ from time import monotonic, sleep
 import numpy as np
 
 from config import (
-    ACTIVITY_DETAIL_POINT,
-    ACTIVITY_LIST_SWIPE,
-    ACTIVITY_SCROLL_DISTANCE,
-    ACTIVITY_LIST_VISIBLE_Y,
-    ACTIVITY_BUTTON_MARGIN,
     ACTIVITY_ALIGN_DISTANCE,
     ACTIVITY_ALIGN_MAX_SWIPES,
+    ACTIVITY_BUTTON_MARGIN,
+    ACTIVITY_DETAIL_POINT,
+    ACTIVITY_LIST_SWIPE,
+    ACTIVITY_LIST_VISIBLE_Y,
+    ACTIVITY_SCROLL_DISTANCE,
     ACTIVITY_SCROLL_MAX_SWIPES,
-    ACTIVITY_SCROLL_START,
     ACTIVITY_SCROLL_SETTLE_SECONDS,
-    SONAR_ENTRY_USE_IMAGE,
-    SONAR_ENTRY_TEMPLATE,
-    SONAR_ENTRY_THRESHOLD,
-    SONAR_ENTRY_CLICK_OFFSET,
+    ACTIVITY_SCROLL_START,
     GAME_PACKAGE_NAME,
     LEVEL_GRID_SIZES,
     OUTPUT_DIR,
     SCREENSHOT_DIR,
+    SONAR_ENTRY_CLICK_OFFSET,
+    SONAR_ENTRY_TEMPLATE,
+    SONAR_ENTRY_THRESHOLD,
+    SONAR_ENTRY_USE_IMAGE,
     SUBMARINES,
     TEMPLATE_DIR,
     USE_SAVED_POINTS,
@@ -230,7 +230,8 @@ def enter_activity(re_enter: bool = False, max_retries: int = 5) -> None:
             entry_clicked = click_sonar_entry()
         else:
             if not re_enter:
-                adb.delay(0.4).swipe(*ACTIVITY_LIST_SWIPE)
+                adb.delay(0.4).swipe(*ACTIVITY_LIST_SWIPE)  # 首次进入需要展示全部选项
+                adb.delay(0.2).swipe(*ACTIVITY_LIST_SWIPE)
             adb.delay(0.7).click(*ACTIVITY_DETAIL_POINT)
             entry_clicked = True
         if entry_clicked and wait_until_occur(QUIT_ACTIVITY_TEMPLATE, timeout=15) is not None:
@@ -721,8 +722,8 @@ def main(level: int) -> Path | None:
         logger.info("脚本总运行时间：%s", format_elapsed(monotonic() - run_started_at))
 
 
-def run(level: int = 1) -> Path | None:
-    """命令行与 GUI 共用的入口，保留异常恢复和退出清理。"""
+def run(level: int) -> Path | None:
+    """命令行与 GUI 共用的入口，负责权限检查和退出清理。"""
     register_exit_cleanup()
     try:
         adb.ensure_root_shell()
@@ -738,4 +739,5 @@ def run(level: int = 1) -> Path | None:
 
 
 if __name__ == "__main__":
-    run()
+    level = 2
+    run(level)
